@@ -63,6 +63,8 @@ services:
       # Auth Settings
       - AUTH_TYPE=${AUTH_TYPE:-basic}
       - POSTGRES_HOST=${POSTGRES_HOST:-relational_db}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - VESPA_HOST=${VESPA_HOST:-index}
       - REDIS_HOST=${REDIS_HOST:-cache}
       - MODEL_SERVER_HOST=${MODEL_SERVER_HOST:-inference_model_server}
@@ -103,6 +105,8 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_HOST=${POSTGRES_HOST:-relational_db}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - VESPA_HOST=${VESPA_HOST:-index}
       - REDIS_HOST=${REDIS_HOST:-cache}
       - MODEL_SERVER_HOST=${MODEL_SERVER_HOST:-inference_model_server}
