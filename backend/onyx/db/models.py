@@ -30,6 +30,7 @@ from sqlalchemy import Integer
 from sqlalchemy import Sequence
 from sqlalchemy import String
 from sqlalchemy import Text
+from sqlalchemy import text
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine.interfaces import Dialect
@@ -65,6 +66,7 @@ from onyx.db.enums import (
     UserFileStatus,
     MCPAuthenticationPerformer,
     MCPTransport,
+    ThemePreference,
 )
 from onyx.configs.constants import NotificationType
 from onyx.configs.constants import SearchFeedbackType
@@ -74,6 +76,7 @@ from onyx.db.enums import ChatSessionSharedStatus
 from onyx.db.enums import ConnectorCredentialPairStatus
 from onyx.db.enums import IndexingStatus
 from onyx.db.enums import IndexModelStatus
+from onyx.db.enums import PermissionSyncStatus
 from onyx.db.enums import TaskStatus
 from onyx.db.pydantic_type import PydanticListType, PydanticType
 from onyx.kg.models import KGEntityTypeAttributes
@@ -182,6 +185,15 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     )
     auto_scroll: Mapped[bool | None] = mapped_column(Boolean, default=None)
     shortcut_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    theme_preference: Mapped[ThemePreference | None] = mapped_column(
+        Enum(ThemePreference, native_enum=False),
+        nullable=True,
+        default=None,
+    )
+    # personalization fields are exposed via the chat user settings "Personalization" tab
+    personal_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    personal_role: Mapped[str | None] = mapped_column(String, nullable=True)
+    use_memories: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     chosen_assistants: Mapped[list[int] | None] = mapped_column(
         postgresql.JSONB(), nullable=True, default=None
@@ -237,6 +249,17 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     accessible_mcp_servers: Mapped[list["MCPServer"]] = relationship(
         "MCPServer", secondary="mcp_server__user", back_populates="users"
     )
+    memories: Mapped[list["Memory"]] = relationship(
+        "Memory",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    oauth_user_tokens: Mapped[list["OAuthUserToken"]] = relationship(
+        "OAuthUserToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     @validates("email")
     def validate_email(self, key: str, value: str) -> str:
@@ -252,6 +275,31 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
 
 class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
     pass
+
+
+class Memory(Base):
+    __tablename__ = "memory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("user.id", ondelete="CASCADE"), nullable=False
+    )
+    memory_text: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True
+    )
+    message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="memories")
 
 
 class ApiKey(Base):
@@ -271,6 +319,45 @@ class ApiKey(Base):
 
     # Add this relationship to access the User object via user_id
     user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+
+
+class PersonalAccessToken(Base):
+    __tablename__ = "personal_access_token"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)  # User-provided label
+    hashed_token: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False
+    )  # SHA256 = 64 hex chars
+    token_display: Mapped[str] = mapped_column(String, nullable=False)
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("user.id", ondelete="CASCADE"), nullable=False
+    )
+
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )  # NULL = no expiration. Revocation sets this to NOW() for immediate expiry.
+
+    # Audit fields
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_used_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    is_revoked: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), nullable=False
+    )  # True if user explicitly revoked (vs naturally expired)
+
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+
+    # Indexes for performance
+    __table_args__ = (
+        Index(
+            "ix_pat_user_created", user_id, created_at.desc()
+        ),  # Fast user token listing
+    )
 
 
 class Notification(Base):
@@ -2319,6 +2406,12 @@ class LLMProvider(Base):
         secondary="llm_provider__user_group",
         viewonly=True,
     )
+    personas: Mapped[list["Persona"]] = relationship(
+        "Persona",
+        secondary="llm_provider__persona",
+        back_populates="allowed_by_llm_providers",
+        viewonly=True,
+    )
     model_configurations: Mapped[list["ModelConfiguration"]] = relationship(
         "ModelConfiguration",
         back_populates="llm_provider",
@@ -2352,6 +2445,8 @@ class ModelConfiguration(Base):
     # - The end-user configures models through a "Well Known LLM Provider".
     # - The end-user is configuring a model and chooses not to set a max-input-tokens limit.
     max_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    supports_image_input: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     llm_provider: Mapped["LLMProvider"] = relationship(
         "LLMProvider",
@@ -2471,8 +2566,16 @@ class Tool(Base):
     mcp_server_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("mcp_server.id", ondelete="CASCADE"), nullable=True
     )
+    # OAuth configuration for this tool (null for tools without OAuth)
+    oauth_config_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("oauth_config.id", ondelete="SET NULL"), nullable=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     user: Mapped[User | None] = relationship("User", back_populates="custom_tools")
+    oauth_config: Mapped["OAuthConfig | None"] = relationship(
+        "OAuthConfig", back_populates="tools"
+    )
     # Relationship to Persona through the association table
     personas: Mapped[list["Persona"]] = relationship(
         "Persona",
@@ -2482,6 +2585,92 @@ class Tool(Base):
     # MCP server relationship
     mcp_server: Mapped["MCPServer | None"] = relationship(
         "MCPServer", back_populates="current_actions"
+    )
+
+
+class OAuthConfig(Base):
+    """OAuth provider configuration that can be shared across multiple tools"""
+
+    __tablename__ = "oauth_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+
+    # OAuth provider endpoints
+    authorization_url: Mapped[str] = mapped_column(Text, nullable=False)
+    token_url: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Client credentials (encrypted)
+    client_id: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
+    client_secret: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
+
+    # Optional configurations
+    scopes: Mapped[list[str] | None] = mapped_column(postgresql.JSONB(), nullable=True)
+    additional_params: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(), nullable=True
+    )
+
+    # Metadata
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    tools: Mapped[list["Tool"]] = relationship("Tool", back_populates="oauth_config")
+    user_tokens: Mapped[list["OAuthUserToken"]] = relationship(
+        "OAuthUserToken", back_populates="oauth_config", cascade="all, delete-orphan"
+    )
+
+
+class OAuthUserToken(Base):
+    """Per-user OAuth tokens for a specific OAuth configuration"""
+
+    __tablename__ = "oauth_user_token"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    oauth_config_id: Mapped[int] = mapped_column(
+        ForeignKey("oauth_config.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("user.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Token data (encrypted)
+    # Structure: {
+    #   "access_token": "...",
+    #   "refresh_token": "...",  # Optional
+    #   "token_type": "Bearer",
+    #   "expires_at": 1234567890,  # Unix timestamp, optional
+    #   "scope": "repo user"  # Optional
+    # }
+    token_data: Mapped[dict[str, Any]] = mapped_column(EncryptedJson(), nullable=False)
+
+    # Metadata
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    oauth_config: Mapped["OAuthConfig"] = relationship(
+        "OAuthConfig", back_populates="user_tokens"
+    )
+    user: Mapped["User"] = relationship("User")
+
+    # Unique constraint: One token per user per OAuth config
+    __table_args__ = (
+        UniqueConstraint("oauth_config_id", "user_id", name="uq_oauth_user_token"),
     )
 
 
@@ -2596,6 +2785,12 @@ class Persona(Base):
     groups: Mapped[list["UserGroup"]] = relationship(
         "UserGroup",
         secondary="persona__user_group",
+        viewonly=True,
+    )
+    allowed_by_llm_providers: Mapped[list["LLMProvider"]] = relationship(
+        "LLMProvider",
+        secondary="llm_provider__persona",
+        back_populates="personas",
         viewonly=True,
     )
     # Relationship to UserFile
@@ -2915,6 +3110,22 @@ class Persona__UserGroup(Base):
     persona_id: Mapped[int] = mapped_column(ForeignKey("persona.id"), primary_key=True)
     user_group_id: Mapped[int] = mapped_column(
         ForeignKey("user_group.id"), primary_key=True
+    )
+
+
+class LLMProvider__Persona(Base):
+    """Association table restricting LLM providers to specific personas.
+
+    If no such rows exist for a given LLM provider, then it is accessible by all personas.
+    """
+
+    __tablename__ = "llm_provider__persona"
+
+    llm_provider_id: Mapped[int] = mapped_column(
+        ForeignKey("llm_provider.id", ondelete="CASCADE"), primary_key=True
+    )
+    persona_id: Mapped[int] = mapped_column(
+        ForeignKey("persona.id", ondelete="CASCADE"), primary_key=True
     )
 
 
@@ -3281,7 +3492,9 @@ class UserFile(Base):
         back_populates="user_files",
     )
     file_id: Mapped[str] = mapped_column(nullable=False)
-    document_id: Mapped[str] = mapped_column(nullable=False)
+    document_id: Mapped[str] = mapped_column(
+        nullable=False
+    )  # TODO(subash): legacy document_id, will be removed in a future migration
     name: Mapped[str] = mapped_column(nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         default=datetime.datetime.utcnow
@@ -3431,6 +3644,8 @@ class ResearchAgentIterationSubStep(Base):
     # for search-based step-types
     cited_doc_results: Mapped[JSON_ro] = mapped_column(postgresql.JSONB())
     claims: Mapped[list[str] | None] = mapped_column(postgresql.JSONB(), nullable=True)
+    is_web_fetch: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    queries: Mapped[list[str] | None] = mapped_column(postgresql.JSONB(), nullable=True)
 
     # for image generation step-types
     generated_images: Mapped[GeneratedImageFullResult | None] = mapped_column(
@@ -3595,3 +3810,145 @@ class MCPConnectionConfig(Base):
         Index("ix_mcp_connection_config_user_email", "user_email"),
         Index("ix_mcp_connection_config_server_user", "mcp_server_id", "user_email"),
     )
+
+
+"""
+Permission Sync Tables
+"""
+
+
+class DocPermissionSyncAttempt(Base):
+    """
+    Represents an attempt to sync document permissions for a connector credential pair.
+    Similar to IndexAttempt but specifically for document permission syncing operations.
+    """
+
+    __tablename__ = "doc_permission_sync_attempt"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    connector_credential_pair_id: Mapped[int] = mapped_column(
+        ForeignKey("connector_credential_pair.id"),
+        nullable=False,
+    )
+
+    # Status of the sync attempt
+    status: Mapped[PermissionSyncStatus] = mapped_column(
+        Enum(PermissionSyncStatus, native_enum=False, index=True)
+    )
+
+    # Counts for tracking progress
+    total_docs_synced: Mapped[int | None] = mapped_column(Integer, default=0)
+    docs_with_permission_errors: Mapped[int | None] = mapped_column(Integer, default=0)
+
+    # Error message if sync fails
+    error_message: Mapped[str | None] = mapped_column(Text, default=None)
+
+    # Timestamps
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
+    time_started: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    time_finished: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+    # Relationships
+    connector_credential_pair: Mapped[ConnectorCredentialPair] = relationship(
+        "ConnectorCredentialPair"
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_permission_sync_attempt_latest_for_cc_pair",
+            "connector_credential_pair_id",
+            "time_created",
+        ),
+        Index(
+            "ix_permission_sync_attempt_status_time",
+            "status",
+            desc("time_finished"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DocPermissionSyncAttempt(id={self.id!r}, " f"status={self.status!r})>"
+
+    def is_finished(self) -> bool:
+        return self.status.is_terminal()
+
+
+class ExternalGroupPermissionSyncAttempt(Base):
+    """
+    Represents an attempt to sync external group memberships for users.
+    This tracks the syncing of user-to-external-group mappings across connectors.
+    """
+
+    __tablename__ = "external_group_permission_sync_attempt"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    # Can be tied to a specific connector or be a global group sync
+    connector_credential_pair_id: Mapped[int | None] = mapped_column(
+        ForeignKey("connector_credential_pair.id"),
+        nullable=True,  # Nullable for global group syncs across all connectors
+    )
+
+    # Status of the group sync attempt
+    status: Mapped[PermissionSyncStatus] = mapped_column(
+        Enum(PermissionSyncStatus, native_enum=False, index=True)
+    )
+
+    # Counts for tracking progress
+    total_users_processed: Mapped[int | None] = mapped_column(Integer, default=0)
+    total_groups_processed: Mapped[int | None] = mapped_column(Integer, default=0)
+    total_group_memberships_synced: Mapped[int | None] = mapped_column(
+        Integer, default=0
+    )
+
+    # Error message if sync fails
+    error_message: Mapped[str | None] = mapped_column(Text, default=None)
+
+    # Timestamps
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
+    time_started: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    time_finished: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+    # Relationships
+    connector_credential_pair: Mapped[ConnectorCredentialPair | None] = relationship(
+        "ConnectorCredentialPair"
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_group_sync_attempt_cc_pair_time",
+            "connector_credential_pair_id",
+            "time_created",
+        ),
+        Index(
+            "ix_group_sync_attempt_status_time",
+            "status",
+            desc("time_finished"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ExternalGroupPermissionSyncAttempt(id={self.id!r}, "
+            f"status={self.status!r})>"
+        )
+
+    def is_finished(self) -> bool:
+        return self.status.is_terminal()

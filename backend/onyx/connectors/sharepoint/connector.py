@@ -41,7 +41,7 @@ from onyx.connectors.interfaces import CheckpointOutput
 from onyx.connectors.interfaces import GenerateSlimDocumentOutput
 from onyx.connectors.interfaces import IndexingHeartbeatInterface
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
-from onyx.connectors.interfaces import SlimConnector
+from onyx.connectors.interfaces import SlimConnectorWithPermSync
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorCheckpoint
 from onyx.connectors.models import ConnectorFailure
@@ -57,6 +57,8 @@ from onyx.connectors.sharepoint.connector_utils import get_sharepoint_external_a
 from onyx.file_processing.extract_file_text import ACCEPTED_IMAGE_FILE_EXTENSIONS
 from onyx.file_processing.extract_file_text import extract_text_and_images
 from onyx.file_processing.extract_file_text import get_file_ext
+from onyx.file_processing.extract_file_text import is_accepted_file_ext
+from onyx.file_processing.extract_file_text import OnyxExtensionType
 from onyx.file_processing.file_validation import EXCLUDED_IMAGE_TYPES
 from onyx.file_processing.image_utils import store_image_and_create_section
 from onyx.utils.b64 import get_image_type_from_bytes
@@ -73,7 +75,8 @@ class SiteDescriptor(BaseModel):
     """Data class for storing SharePoint site information.
 
     Args:
-        url: The base site URL (e.g. https://danswerai.sharepoint.com/sites/sharepoint-tests)
+        url: The base site URL (e.g. https://danswerai.sharepoint.com/sites/sharepoint-tests
+             or https://danswerai.sharepoint.com/teams/team-name)
         drive_name: The name of the drive to access (e.g. "Shared Documents", "Other Library")
                    If None, all drives will be accessed.
         folder_path: The folder path within the drive to access (e.g. "test/nested with spaces")
@@ -672,7 +675,7 @@ def _convert_sitepage_to_slim_document(
 
 
 class SharepointConnector(
-    SlimConnector,
+    SlimConnectorWithPermSync,
     CheckpointedConnectorWithPermSync[SharepointConnectorCheckpoint],
 ):
     def __init__(
@@ -703,9 +706,11 @@ class SharepointConnector(
 
         # Ensure sites are sharepoint urls
         for site_url in self.sites:
-            if not site_url.startswith("https://") or "/sites/" not in site_url:
+            if not site_url.startswith("https://") or not (
+                "/sites/" in site_url or "/teams/" in site_url
+            ):
                 raise ConnectorValidationError(
-                    "Site URLs must be full Sharepoint URLs (e.g. https://your-tenant.sharepoint.com/sites/your-site)"
+                    "Site URLs must be full Sharepoint URLs (e.g. https://your-tenant.sharepoint.com/sites/your-site or https://your-tenant.sharepoint.com/teams/your-team)"
                 )
 
     @property
@@ -720,10 +725,17 @@ class SharepointConnector(
         site_data_list = []
         for url in site_urls:
             parts = url.strip().split("/")
+
+            site_type_index = None
             if "sites" in parts:
-                sites_index = parts.index("sites")
-                site_url = "/".join(parts[: sites_index + 2])
-                remaining_parts = parts[sites_index + 2 :]
+                site_type_index = parts.index("sites")
+            elif "teams" in parts:
+                site_type_index = parts.index("teams")
+
+            if site_type_index is not None:
+                # Extract the base site URL (up to and including the site/team name)
+                site_url = "/".join(parts[: site_type_index + 2])
+                remaining_parts = parts[site_type_index + 2 :]
 
                 # Extract drive name and folder path
                 if remaining_parts:
@@ -745,7 +757,9 @@ class SharepointConnector(
                     )
                 )
             else:
-                logger.warning(f"Site URL '{url}' is not a valid Sharepoint URL")
+                logger.warning(
+                    f"Site URL '{url}' is not a valid Sharepoint URL (must contain /sites/ or /teams/)"
+                )
         return site_data_list
 
     def _get_drive_items_for_drive_name(
@@ -758,7 +772,7 @@ class SharepointConnector(
         try:
             site = self.graph_client.sites.get_by_url(site_descriptor.url)
             drives = site.drives.get().execute_query()
-            logger.debug(f"Found drives: {[drive.name for drive in drives]}")
+            logger.info(f"Found drives: {[drive.name for drive in drives]}")
 
             drives = [
                 drive
@@ -770,11 +784,15 @@ class SharepointConnector(
             if drive is None:
                 logger.warning(f"Drive '{drive_name}' not found")
                 return []
+
+            logger.info(f"Found drive: {drive.name}")
             try:
                 root_folder = drive.root
                 if site_descriptor.folder_path:
                     for folder_part in site_descriptor.folder_path.split("/"):
                         root_folder = root_folder.get_by_path(folder_part)
+
+                logger.info(f"Found root folder: {root_folder.name}")
 
                 # TODO: consider ways to avoid materializing the entire list of files in memory
                 query = root_folder.get_files(
@@ -782,7 +800,7 @@ class SharepointConnector(
                     page_size=1000,
                 )
                 driveitems = query.execute_query()
-                logger.debug(f"Found {len(driveitems)} items in drive '{drive_name}'")
+                logger.info(f"Found {len(driveitems)} items in drive '{drive_name}'")
 
                 # Filter items based on folder path if specified
                 if site_descriptor.folder_path:
@@ -821,7 +839,7 @@ class SharepointConnector(
                         <= item.last_modified_datetime.replace(tzinfo=timezone.utc)
                         <= end
                     ]
-                    logger.debug(
+                    logger.info(
                         f"Found {len(driveitems)} items within time window in drive '{drive.name}'"
                     )
 
@@ -1408,6 +1426,9 @@ class SharepointConnector(
                 return checkpoint
 
             try:
+                logger.info(
+                    f"Fetching drive items for drive name: {current_drive_name}"
+                )
                 driveitems = self._get_drive_items_for_drive_name(
                     site_descriptor, current_drive_name, start_dt, end_dt
                 )
@@ -1441,6 +1462,12 @@ class SharepointConnector(
             )
             for driveitem in driveitems:
                 driveitem_extension = get_file_ext(driveitem.name)
+                if not is_accepted_file_ext(driveitem_extension, OnyxExtensionType.All):
+                    logger.warning(
+                        f"Skipping {driveitem.web_url} as it is not a supported file type"
+                    )
+                    continue
+
                 # Only yield empty documents if they are PDFs or images
                 should_yield_if_empty = (
                     driveitem_extension in ACCEPTED_IMAGE_FILE_EXTENSIONS
@@ -1464,6 +1491,10 @@ class SharepointConnector(
                                 TextSection(link=driveitem.web_url, text="")
                             ]
                             yield doc
+                        else:
+                            logger.warning(
+                                f"Skipping {driveitem.web_url} as it is empty and not a PDF or image"
+                            )
                 except Exception as e:
                     logger.warning(
                         f"Failed to process driveitem {driveitem.web_url}: {e}"
@@ -1597,7 +1628,7 @@ class SharepointConnector(
     ) -> SharepointConnectorCheckpoint:
         return SharepointConnectorCheckpoint.model_validate_json(checkpoint_json)
 
-    def retrieve_all_slim_documents(
+    def retrieve_all_slim_docs_perm_sync(
         self,
         start: SecondsSinceUnixEpoch | None = None,
         end: SecondsSinceUnixEpoch | None = None,

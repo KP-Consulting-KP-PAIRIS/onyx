@@ -1,7 +1,6 @@
-import { test, expect } from "@chromatic-com/playwright";
+import { test } from "@chromatic-com/playwright";
 import { loginAsRandomUser } from "../utils/auth";
 import {
-  navigateToAssistantInHistorySidebar,
   sendMessage,
   startNewChat,
   verifyAssistantIsChosen,
@@ -10,6 +9,11 @@ import {
 test("Chat workflow", async ({ page }) => {
   // Clear cookies and log in as a random user
   await page.context().clearCookies();
+  // Use waitForSelector for robustness instead of expect().toBeVisible()
+  // await page.waitForSelector(
+  //   `//div[@aria-label="Agents Modal"]//*[contains(text(), "${assistantName}") and not(contains(@class, 'invisible'))]`,
+  //   { state: "visible", timeout: 10000 }
+  // );
   await loginAsRandomUser(page);
 
   // Navigate to the chat page
@@ -26,8 +30,8 @@ test("Chat workflow", async ({ page }) => {
   await verifyAssistantIsChosen(page, "Onyx");
 
   // Test creation of a new assistant
-  await page.getByRole("button", { name: "Explore Assistants" }).click();
-  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await page.getByTestId("AppSidebar/more-agents").click();
+  await page.getByTestId("AgentsPage/new-agent-button").click();
   await page.getByTestId("name").click();
   await page.getByTestId("name").fill("Test Assistant");
   await page.getByTestId("description").click();

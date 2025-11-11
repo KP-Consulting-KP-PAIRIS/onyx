@@ -16,6 +16,7 @@ import httpx
 import requests
 import voyageai  # type: ignore
 from cohere import AsyncClient as CohereAsyncClient
+from cohere.core.api_error import ApiError
 from google.oauth2 import service_account  # type: ignore
 from httpx import HTTPError
 from requests import JSONDecodeError
@@ -25,7 +26,6 @@ from retry import retry
 
 from onyx.configs.app_configs import INDEXING_EMBEDDING_MODEL_NUM_THREADS
 from onyx.configs.app_configs import LARGE_CHUNK_RATIO
-from onyx.configs.app_configs import SKIP_WARM_UP
 from onyx.configs.model_configs import BATCH_SIZE_ENCODE_CHUNKS
 from onyx.configs.model_configs import (
     BATCH_SIZE_ENCODE_CHUNKS_FOR_API_EMBEDDING_SERVICES,
@@ -39,9 +39,8 @@ from onyx.natural_language_processing.constants import DEFAULT_OPENAI_MODEL
 from onyx.natural_language_processing.constants import DEFAULT_VERTEX_MODEL
 from onyx.natural_language_processing.constants import DEFAULT_VOYAGE_MODEL
 from onyx.natural_language_processing.constants import EmbeddingModelTextType
-from onyx.natural_language_processing.exceptions import (
-    ModelServerRateLimitError,
-)
+from onyx.natural_language_processing.exceptions import CohereBillingLimitError
+from onyx.natural_language_processing.exceptions import ModelServerRateLimitError
 from onyx.natural_language_processing.utils import get_tokenizer
 from onyx.natural_language_processing.utils import tokenizer_trim_content
 from onyx.utils.logger import setup_logger
@@ -53,6 +52,7 @@ from shared_configs.configs import INDEXING_ONLY
 from shared_configs.configs import MODEL_SERVER_HOST
 from shared_configs.configs import MODEL_SERVER_PORT
 from shared_configs.configs import OPENAI_EMBEDDING_TIMEOUT
+from shared_configs.configs import SKIP_WARM_UP
 from shared_configs.configs import VERTEXAI_EMBEDDING_LOCAL_BATCH_SIZE
 from shared_configs.enums import EmbeddingProvider
 from shared_configs.enums import EmbedTextType
@@ -200,7 +200,7 @@ class CloudEmbedding:
             response = await client.embeddings.create(
                 input=text_batch,
                 model=model,
-                dimensions=reduced_dimension or openai.NOT_GIVEN,
+                dimensions=reduced_dimension or openai.omit,
             )
             final_embeddings.extend(
                 [embedding.embedding for embedding in response.data]
@@ -290,7 +290,10 @@ class CloudEmbedding:
 
         # Dispatch all embedding calls asynchronously at once
         tasks = [
-            client.get_embeddings_async(batch, auto_truncate=True) for batch in batches
+            client.get_embeddings_async(
+                cast(list[str | TextEmbeddingInput], batch), auto_truncate=True
+            )
+            for batch in batches
         ]
 
         # Wait for all tasks to complete in parallel
@@ -426,7 +429,20 @@ async def cohere_rerank_api(
     query: str, docs: list[str], model_name: str, api_key: str
 ) -> list[float]:
     cohere_client = CohereAsyncClient(api_key=api_key)
-    response = await cohere_client.rerank(query=query, documents=docs, model=model_name)
+    try:
+        response = await cohere_client.rerank(
+            query=query, documents=docs, model=model_name
+        )
+    except ApiError as err:
+        if err.status_code == 402:
+            logger.warning(
+                "Cohere rerank request rejected due to billing cap. "
+                "Falling back to retrieval ordering until billing resets."
+            )
+            raise CohereBillingLimitError(
+                "Cohere billing limit reached for reranking"
+            ) from err
+        raise
     results = response.results
     sorted_results = sorted(results, key=lambda item: item.index)
     return [result.relevance_score for result in sorted_results]
@@ -1115,6 +1131,9 @@ def warm_up_cross_encoder(
     rerank_model_name: str,
     non_blocking: bool = False,
 ) -> None:
+    if SKIP_WARM_UP:
+        return
+
     logger.debug(f"Warming up reranking model: {rerank_model_name}")
 
     reranking_model = RerankingModel(

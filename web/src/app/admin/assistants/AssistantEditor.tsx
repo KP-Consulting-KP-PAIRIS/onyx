@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { JSX } from "react";
 import { Option } from "@/components/Dropdown";
 import { generateRandomIconShape } from "@/lib/assistantIconUtils";
 import {
@@ -11,7 +11,7 @@ import {
   UserRole,
 } from "@/lib/types";
 import { Separator } from "@/components/ui/separator";
-import { Button } from "@/components/ui/button";
+import Button from "@/refresh-components/buttons/Button";
 import {
   ArrayHelpers,
   FieldArray,
@@ -20,7 +20,6 @@ import {
   FormikProps,
   FastField,
 } from "formik";
-
 import { BooleanFormField, Label, TextFormField } from "@/components/Field";
 import { MemoizedToolList } from "@/components/admin/assistants/MemoizedToolCheckboxes";
 import {
@@ -30,7 +29,6 @@ import {
   TaskPromptField,
   MCPServerSection,
 } from "@/components/admin/assistants/FormSections";
-
 import { usePopup } from "@/components/admin/connectors/Popup";
 import { getDisplayNameForModel, useLabels } from "@/lib/hooks";
 import { DocumentSetSelectable } from "@/components/documentSet/DocumentSetSelectable";
@@ -42,13 +40,6 @@ import {
 } from "@/lib/llm/utils";
 import { ToolSnapshot, MCPServer } from "@/lib/tools/interfaces";
 import { checkUserIsNoAuthUser } from "@/lib/user";
-
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -61,28 +52,29 @@ import {
 } from "react";
 import * as Yup from "yup";
 import { SettingsContext } from "@/components/settings/SettingsProvider";
-import { FullPersona, PersonaLabel, StarterMessage } from "./interfaces";
+import {
+  FullPersona,
+  PersonaLabel,
+  StarterMessage,
+} from "@/app/admin/assistants/interfaces";
 import {
   PersonaUpsertParameters,
   createPersona,
   updatePersona,
   deletePersona,
-} from "./lib";
+} from "@/app/admin/assistants/lib";
 import {
   CameraIcon,
   GroupsIconSkeleton,
-  NewChatIcon,
   SwapIcon,
   TrashIcon,
 } from "@/components/icons/icons";
 import { buildImgUrl } from "@/app/chat/components/files/images/utils";
-import { useAssistantsContext } from "@/components/context/AssistantsContext";
 import { debounce } from "lodash";
-import { LLMProviderView } from "../configuration/llm/interfaces";
-import StarterMessagesList from "./StarterMessageList";
-
+import { LLMProviderView } from "@/app/admin/configuration/llm/interfaces";
+import StarterMessagesList from "@/app/admin/assistants/StarterMessageList";
 import { SwitchField } from "@/components/ui/switch";
-import { generateIdenticon } from "@/components/assistants/AssistantIcon";
+import { generateIdenticon } from "@/refresh-components/AgentIcon";
 import { BackButton } from "@/components/BackButton";
 import { AdvancedOptionsToggle } from "@/components/AdvancedOptionsToggle";
 import { MinimalUserSnapshot } from "@/lib/types";
@@ -92,25 +84,15 @@ import {
   Option as DropdownOption,
 } from "@/components/Dropdown";
 import { SourceChip } from "@/app/chat/components/input/ChatInputBar";
-import { FileCard } from "@/app/chat/components/projects/ProjectContextPanel";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import FilesList from "@/app/chat/components/files/FilesList";
-import {
-  MultipleFilesIcon,
-  OpenFolderIcon,
-} from "@/components/icons/CustomIcons";
+import { FileCard } from "@/app/chat/components/input/FileCard";
+import { hasNonImageFiles } from "@/lib/utils";
+import CoreModal from "@/refresh-components/modals/CoreModal";
+import UserFilesModalContent from "@/components/modals/UserFilesModalContent";
 import { TagIcon, UserIcon, FileIcon, InfoIcon, BookIcon } from "lucide-react";
 import { LLMSelector } from "@/components/llm/LLMSelector";
-import useSWR from "swr";
+import useSWR, { mutate } from "swr";
 import { errorHandlingFetcher } from "@/lib/fetcher";
 import { ConfirmEntityModal } from "@/components/modals/ConfirmEntityModal";
-
 import {
   IMAGE_GENERATION_TOOL_ID,
   SEARCH_TOOL_ID,
@@ -120,9 +102,19 @@ import TextView from "@/components/chat/TextView";
 import { MinimalOnyxDocument } from "@/lib/search/interfaces";
 import { MAX_CHARACTERS_PERSONA_DESCRIPTION } from "@/lib/constants";
 import { FormErrorFocus } from "@/components/FormErrorHelpers";
-import { ProjectFile } from "@/app/chat/projects/projectsService";
+import {
+  ProjectFile,
+  UserFileStatus,
+} from "@/app/chat/projects/projectsService";
 import { useProjectsContext } from "@/app/chat/projects/ProjectsContext";
-import FilePicker from "@/app/chat/components/files/FilePicker";
+import FilePickerPopover from "@/refresh-components/popovers/FilePickerPopover";
+import SvgTrash from "@/icons/trash";
+import SvgEditBig from "@/icons/edit-big";
+import SvgFiles from "@/icons/files";
+import { useAgentsContext } from "@/refresh-components/contexts/AgentsContext";
+import Text from "@/refresh-components/texts/Text";
+import CreateButton from "@/refresh-components/buttons/CreateButton";
+import SimpleTooltip from "@/refresh-components/SimpleTooltip";
 
 function findSearchTool(tools: ToolSnapshot[]) {
   return tools.find((tool) => tool.in_code_tool_id === SEARCH_TOOL_ID);
@@ -168,7 +160,9 @@ export function AssistantEditor({
   tools: ToolSnapshot[];
   shouldAddAssistantToUserPreferences?: boolean;
 }) {
-  const { refreshAssistants } = useAssistantsContext();
+  // NOTE: assistants = agents
+  // TODO: rename everything to agents
+  const { refreshAgents } = useAgentsContext();
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -213,6 +207,7 @@ export function AssistantEditor({
     [llmProviders.length]
   );
   const isUpdate = existingPersona !== undefined && existingPersona !== null;
+
   const defaultProvider = llmProviders.find(
     (llmProvider) => llmProvider.is_default_provider
   );
@@ -337,12 +332,14 @@ export function AssistantEditor({
     enabledToolsMap[tool.id] = personaCurrentToolIds.includes(tool.id);
   });
 
-  const { recentFiles, uploadFiles: uploadProjectFiles } = useProjectsContext();
+  const { allRecentFiles, beginUpload } = useProjectsContext();
 
   const [showVisibilityWarning, setShowVisibilityWarning] = useState(false);
 
+  const connectorsExist = ccPairs.length > 0;
+
   const canShowKnowledgeSource =
-    ccPairs.length > 0 &&
+    connectorsExist &&
     searchTool &&
     !(user?.role === UserRole.BASIC && documentSets.length === 0);
 
@@ -525,7 +522,7 @@ export function AssistantEditor({
     if (existingPersona) {
       const response = await deletePersona(existingPersona.id);
       if (response.ok) {
-        await refreshAssistants();
+        await refreshAgents();
         router.push(
           isAdminPage ? `/admin/assistants?u=${Date.now()}` : `/chat`
         );
@@ -537,6 +534,8 @@ export function AssistantEditor({
       }
     }
   };
+
+  // Removed invalid helper; replacement happens inline in the upload handler using the beginUpload onSuccess callback
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -596,11 +595,9 @@ export function AssistantEditor({
         validateOnBlur={false}
         validationSchema={Yup.object()
           .shape({
-            name: Yup.string().required(
-              "Must provide a name for the Assistant"
-            ),
+            name: Yup.string().required("Must provide a name for the Agent"),
             description: Yup.string().required(
-              "Must provide a description for the Assistant"
+              "Must provide a description for the Agent"
             ),
             system_prompt: Yup.string().max(
               MAX_CHARACTERS_PERSONA_DESCRIPTION,
@@ -741,7 +738,7 @@ export function AssistantEditor({
           let error = null;
 
           if (!personaResponse) {
-            error = "Failed to create Assistant - no response received";
+            error = "Failed to create Agent - no response received";
           } else if (!personaResponse.ok) {
             error = await personaResponse.text();
           }
@@ -749,7 +746,7 @@ export function AssistantEditor({
           if (error || !personaResponse) {
             setPopup({
               type: "error",
-              message: `Failed to create Assistant - ${error}`,
+              message: `Failed to create Agent - ${error}`,
             });
             formikHelpers.setSubmitting(false);
           } else {
@@ -777,7 +774,7 @@ export function AssistantEditor({
                   message: `"${assistant.name}" has been added to your list.`,
                   type: "success",
                 });
-                await refreshAssistants();
+                await refreshAgents();
               } else {
                 setPopup({
                   message: `"${assistant.name}" could not be added to your list.`,
@@ -786,7 +783,15 @@ export function AssistantEditor({
               }
             }
 
-            await refreshAssistants();
+            await refreshAgents();
+
+            // Force refetch LLM provider cache for this agent
+            // This ensures the chat page shows the updated provider list
+            await mutate(
+              `/api/llm/persona/${assistantId}/providers`,
+              undefined,
+              { revalidate: true }
+            );
 
             router.push(
               isAdminPage
@@ -818,7 +823,7 @@ export function AssistantEditor({
               return (
                 <img
                   src={uploadedImagePreview}
-                  alt="Uploaded assistant icon"
+                  alt="Uploaded agent icon"
                   className="w-12 h-12 rounded-full object-cover"
                 />
               );
@@ -828,7 +833,7 @@ export function AssistantEditor({
               return (
                 <img
                   src={buildImgUrl(existingPersona?.uploaded_image_id)}
-                  alt="Uploaded assistant icon"
+                  alt="Uploaded agent icon"
                   className="w-12 h-12 rounded-full object-cover"
                 />
               );
@@ -845,21 +850,19 @@ export function AssistantEditor({
                 <p className="text-base font-normal text-2xl">
                   {existingPersona ? (
                     <>
-                      Edit assistant <b>{existingPersona.name}</b>
+                      Edit Agent <b>{existingPersona.name}</b>
                     </>
                   ) : (
-                    "Create an Assistant"
+                    "Create an Agent"
                   )}
                 </p>
                 <div className="max-w-4xl w-full">
                   <Separator />
                   <div className="flex gap-x-2 items-center">
-                    <div className="block font-medium text-sm">
-                      Assistant Icon
-                    </div>
+                    <div className="block font-medium text-sm">Agent Icon</div>
                   </div>
                   <SubLabel>
-                    The icon that will visually represent your Assistant
+                    The icon that will visually represent your Agent
                   </SubLabel>
                   <div className="flex gap-x-2 items-center">
                     <div
@@ -875,10 +878,8 @@ export function AssistantEditor({
 
                     <div className="flex flex-col gap-2">
                       <Button
+                        secondary
                         type="button"
-                        variant="outline"
-                        size="sm"
-                        className="text-xs flex justify-start gap-x-2"
                         onClick={() => {
                           const fileInput = document.createElement("input");
                           fileInput.type = "file";
@@ -894,28 +895,27 @@ export function AssistantEditor({
                           };
                           fileInput.click();
                         }}
+                        leftIcon={() => <CameraIcon size={14} />}
                       >
-                        <CameraIcon size={14} />
-                        Upload {values.uploaded_image && "New "}Image
+                        {`Upload ${values.uploaded_image ? "New " : ""}Image`}
                       </Button>
 
                       {values.uploaded_image && (
                         <Button
+                          secondary
                           type="button"
-                          variant="outline"
-                          size="sm"
-                          className="flex justify-start gap-x-2 text-xs"
                           onClick={() => {
                             setUploadedImagePreview(null);
                             setFieldValue("uploaded_image", null);
                             setRemovePersonaImage(false);
                           }}
+                          leftIcon={SvgTrash}
                         >
-                          <TrashIcon className="h-3 w-3" />
-                          {removePersonaImage
-                            ? "Revert to Previous "
-                            : "Remove "}
-                          Image
+                          {`${
+                            removePersonaImage
+                              ? "Revert to Previous "
+                              : "Remove "
+                          } Image`}
                         </Button>
                       )}
 
@@ -923,10 +923,8 @@ export function AssistantEditor({
                         (!existingPersona?.uploaded_image_id ||
                           removePersonaImage) && (
                           <Button
+                            secondary
                             type="button"
-                            className="text-xs"
-                            variant="outline"
-                            size="sm"
                             onClick={(e) => {
                               e.stopPropagation();
                               const newShape = generateRandomIconShape();
@@ -939,8 +937,8 @@ export function AssistantEditor({
                               setFieldValue("icon_shape", newShape.encodedGrid);
                               setFieldValue("icon_color", randomColor);
                             }}
+                            leftIcon={SvgEditBig}
                           >
-                            <NewChatIcon size={14} />
                             Generate Icon
                           </Button>
                         )}
@@ -949,18 +947,16 @@ export function AssistantEditor({
                         removePersonaImage &&
                         !values.uploaded_image && (
                           <Button
+                            secondary
                             type="button"
-                            variant="outline"
-                            className="text-xs"
-                            size="sm"
                             onClick={(e) => {
                               e.stopPropagation();
                               setRemovePersonaImage(false);
                               setUploadedImagePreview(null);
                               setFieldValue("uploaded_image", null);
                             }}
+                            leftIcon={() => <SwapIcon className="h-3 w-3" />}
                           >
-                            <SwapIcon className="h-3 w-3" />
                             Revert to Previous Image
                           </Button>
                         )}
@@ -969,16 +965,14 @@ export function AssistantEditor({
                         !removePersonaImage &&
                         !values.uploaded_image && (
                           <Button
+                            secondary
                             type="button"
-                            variant="outline"
-                            className="text-xs"
-                            size="sm"
                             onClick={(e) => {
                               e.stopPropagation();
                               setRemovePersonaImage(true);
                             }}
+                            leftIcon={SvgTrash}
                           >
-                            <TrashIcon className="h-3 w-3" />
                             Remove Image
                           </Button>
                         )}
@@ -996,70 +990,66 @@ export function AssistantEditor({
 
                 <div className="w-full max-w-4xl">
                   <div className="flex flex-col">
-                    {searchTool && (
-                      <>
-                        <Separator />
-                        <div className="flex gap-x-2 py-2 flex justify-start">
-                          <div>
-                            <div className="flex items-start gap-x-2">
-                              <p className="block font-medium text-sm">
-                                Knowledge
-                              </p>
-                              <div className="flex items-center">
-                                <TooltipProvider>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <div
-                                        className={`${
-                                          ccPairs.length === 0
-                                            ? "opacity-70 cursor-not-allowed"
-                                            : ""
+                    <>
+                      <Separator />
+                      <div className="flex gap-x-2 py-2 justify-start">
+                        <div>
+                          <div className="flex items-start gap-x-2">
+                            <p className="block font-medium text-sm">
+                              Knowledge
+                            </p>
+                            <div className="flex items-center">
+                              <SimpleTooltip
+                                tooltip="To use Knowledge, you need to have at least one Connector configured. You can still upload user files to the agent below."
+                                side="top"
+                                align="center"
+                                disabled={connectorsExist}
+                              >
+                                <div
+                                  className={`${
+                                    !connectorsExist || !searchTool
+                                      ? "opacity-70 cursor-not-allowed"
+                                      : ""
+                                  }`}
+                                >
+                                  <FastField
+                                    name={`enabled_tools_map.${
+                                      // -1 is a placeholder -- this section
+                                      // should be disabled anyways if no search tool
+                                      searchTool?.id || -1
+                                    }`}
+                                  >
+                                    {({ form }: any) => (
+                                      <SwitchField
+                                        size="sm"
+                                        onCheckedChange={(checked: boolean) => {
+                                          form.setFieldValue(
+                                            "num_chunks",
+                                            null
+                                          );
+                                          toggleToolInValues(
+                                            searchTool?.id || -1
+                                          );
+                                        }}
+                                        name={`enabled_tools_map.${
+                                          searchTool?.id || -1
                                         }`}
-                                      >
-                                        <FastField
-                                          name={`enabled_tools_map.${searchTool.id}`}
-                                        >
-                                          {({ form }: any) => (
-                                            <SwitchField
-                                              size="sm"
-                                              onCheckedChange={(
-                                                checked: boolean
-                                              ) => {
-                                                form.setFieldValue(
-                                                  "num_chunks",
-                                                  null
-                                                );
-                                                toggleToolInValues(
-                                                  searchTool.id
-                                                );
-                                              }}
-                                              name={`enabled_tools_map.${searchTool.id}`}
-                                              disabled={ccPairs.length === 0}
-                                            />
-                                          )}
-                                        </FastField>
-                                      </div>
-                                    </TooltipTrigger>
-
-                                    {ccPairs.length === 0 && (
-                                      <TooltipContent side="top" align="center">
-                                        <p className="bg-background-900 max-w-[200px] text-sm rounded-lg p-1.5 text-white">
-                                          To use the Knowledge Action, you need
-                                          to have at least one Connector
-                                          configured.
-                                        </p>
-                                      </TooltipContent>
+                                        disabled={
+                                          !connectorsExist || !searchTool
+                                        }
+                                      />
                                     )}
-                                  </Tooltip>
-                                </TooltipProvider>
-                              </div>
+                                  </FastField>
+                                </div>
+                              </SimpleTooltip>
                             </div>
                           </div>
                         </div>
-                      </>
-                    )}
+                      </div>
+                    </>
 
-                    {searchTool && values.enabled_tools_map[searchTool.id] && (
+                    {((searchTool && values.enabled_tools_map[searchTool.id]) ||
+                      !connectorsExist) && (
                       <div>
                         {canShowKnowledgeSource && (
                           <>
@@ -1118,60 +1108,81 @@ export function AssistantEditor({
                             <div className="text-sm flex flex-col items-start">
                               <SubLabel>Click below to add files</SubLabel>
                               {values.user_file_ids.length > 0 && (
-                                <div className="flex gap-3 mb-2">
-                                  {values.user_file_ids
-                                    .slice(0, 3)
-                                    .map((userFileId: string) => {
-                                      const rf = recentFiles.find(
-                                        (f) => f.id === userFileId
+                                <div className="flex gap-1">
+                                  {(() => {
+                                    // Detect if there are any non-image files in the displayed files
+                                    const displayedFileIds =
+                                      values.user_file_ids.slice(0, 4);
+                                    const displayedFiles: ProjectFile[] =
+                                      displayedFileIds.map(
+                                        (userFileId: string) => {
+                                          const rf = allRecentFiles.find(
+                                            (f) => f.id === userFileId
+                                          );
+                                          return (
+                                            rf ||
+                                            ({
+                                              id: userFileId,
+                                              name: `File ${userFileId.slice(
+                                                0,
+                                                8
+                                              )}`,
+                                              status: UserFileStatus.COMPLETED,
+                                            } as ProjectFile)
+                                          );
+                                        }
                                       );
-                                      const fileData = rf || {
-                                        id: userFileId,
-                                        name: `File ${userFileId.slice(0, 8)}`,
-                                        status: "completed" as const,
-                                      };
+                                    const shouldCompactImages =
+                                      hasNonImageFiles(displayedFiles);
+
+                                    return displayedFiles.map((fileData) => {
                                       return (
-                                        <div key={userFileId} className="w-52">
+                                        <div key={fileData.id} className="w-40">
                                           <FileCard
                                             file={fileData as ProjectFile}
+                                            hideProcessingState
                                             removeFile={() => {
                                               setFieldValue(
                                                 "user_file_ids",
                                                 values.user_file_ids.filter(
                                                   (id: string) =>
-                                                    id !== userFileId
+                                                    id !== fileData.id
                                                 )
                                               );
                                             }}
+                                            compactImages={shouldCompactImages}
                                           />
                                         </div>
                                       );
-                                    })}
-                                  {values.user_file_ids.length > 3 && (
+                                    });
+                                  })()}
+                                  {values.user_file_ids.length > 4 && (
                                     <button
                                       type="button"
-                                      className="rounded-xl px-3 py-1 text-left bg-transparent hover:bg-accent-background-hovered hover:dark:bg-neutral-800/75 transition-colors"
+                                      className="rounded-xl px-3 py-1 text-left transition-colors hover:bg-background-tint-02"
                                       onClick={() => setShowAllUserFiles(true)}
                                     >
                                       <div className="flex flex-col overflow-hidden h-12 p-1">
                                         <div className="flex items-center justify-between gap-2 w-full">
-                                          <span className="text-onyx-medium text-sm truncate flex-1">
+                                          <Text text04 secondaryAction>
                                             View All
-                                          </span>
-                                          <MultipleFilesIcon className="h-5 w-5 text-onyx-medium" />
+                                          </Text>
+                                          <SvgFiles className="h-5 w-5 stroke-text-02" />
                                         </div>
-                                        <span className="text-onyx-muted text-sm">
+                                        <Text text03 secondaryBody>
                                           {values.user_file_ids.length} files
-                                        </span>
+                                        </Text>
                                       </div>
                                     </button>
                                   )}
                                 </div>
                               )}
-                              <FilePicker
-                                showTriggerLabel
-                                triggerLabel="Add User  Files"
-                                recentFiles={recentFiles}
+                              <FilePickerPopover
+                                trigger={(open) => (
+                                  <CreateButton transient={open}>
+                                    Add User Files
+                                  </CreateButton>
+                                )}
                                 onFileClick={(file: ProjectFile) => {
                                   setPresentingDocument({
                                     document_id: `project_file__${file.file_id}`,
@@ -1186,36 +1197,95 @@ export function AssistantEditor({
                                     ]);
                                   }
                                 }}
+                                onUnpickRecent={(file: ProjectFile) => {
+                                  if (values.user_file_ids.includes(file.id)) {
+                                    setFieldValue(
+                                      "user_file_ids",
+                                      values.user_file_ids.filter(
+                                        (id: string) => id !== file.id
+                                      )
+                                    );
+                                  }
+                                }}
                                 handleUploadChange={async (
                                   e: React.ChangeEvent<HTMLInputElement>
                                 ) => {
                                   const files = e.target.files;
                                   if (!files || files.length === 0) return;
-
                                   try {
-                                    const uploaded = await uploadProjectFiles(
-                                      Array.from(files)
+                                    // Use a local tracker to avoid stale closures inside onSuccess
+                                    let selectedIds = [
+                                      ...(values.user_file_ids || []),
+                                    ];
+                                    const optimistic = await beginUpload(
+                                      Array.from(files),
+                                      null,
+                                      setPopup,
+                                      (result) => {
+                                        const uploadedFiles =
+                                          result.user_files || [];
+                                        if (uploadedFiles.length === 0) return;
+                                        const tempToFinal = new Map(
+                                          uploadedFiles
+                                            .filter((f) => f.temp_id)
+                                            .map((f) => [
+                                              f.temp_id as string,
+                                              f.id,
+                                            ])
+                                        );
+                                        const replaced = (
+                                          selectedIds || []
+                                        ).map(
+                                          (id: string) =>
+                                            tempToFinal.get(id) ?? id
+                                        );
+                                        const deduped = Array.from(
+                                          new Set(replaced)
+                                        );
+                                        setFieldValue("user_file_ids", deduped);
+                                        selectedIds = deduped;
+                                      },
+                                      (failedTempIds) => {
+                                        if (
+                                          !failedTempIds ||
+                                          failedTempIds.length === 0
+                                        )
+                                          return;
+                                        const filtered = (
+                                          selectedIds || []
+                                        ).filter(
+                                          (id: string) =>
+                                            !failedTempIds.includes(id)
+                                        );
+                                        setFieldValue(
+                                          "user_file_ids",
+                                          filtered
+                                        );
+                                        selectedIds = filtered;
+                                      }
                                     );
-                                    const newIds = uploaded.user_files.map(
+                                    const optimisticIds = optimistic.map(
                                       (f) => f.id
                                     );
                                     const merged = Array.from(
                                       new Set([
-                                        ...(values.user_file_ids || []),
-                                        ...newIds,
+                                        ...(selectedIds || []),
+                                        ...optimisticIds,
                                       ])
                                     );
                                     setFieldValue("user_file_ids", merged);
+                                    selectedIds = merged;
                                   } finally {
                                     e.target.value = "";
                                   }
                                 }}
+                                selectedFileIds={values.user_file_ids}
                               />
                             </div>
                           )}
 
                         {values.knowledge_source === "team_knowledge" &&
-                          ccPairs.length > 0 && (
+                          connectorsExist && (
                             <>
                               {canShowKnowledgeSource && (
                                 <div className="mt-4">
@@ -1235,9 +1305,9 @@ export function AssistantEditor({
                                         ) : (
                                           "Team Document Sets"
                                         )}{" "}
-                                        this Assistant should use to inform its
+                                        this Agent should use to inform its
                                         responses. If none are specified, the
-                                        Assistant will reference all available
+                                        Agent will reference all available
                                         documents.
                                       </>
                                     </SubLabel>
@@ -1305,11 +1375,11 @@ export function AssistantEditor({
                                 <BooleanFormField
                                   name={`enabled_tools_map.${imageGenerationTool.id}`}
                                   label={imageGenerationTool.display_name}
-                                  subtext="Generate and manipulate images using AI-powered tools"
+                                  subtext="Generate and manipulate images using AI-powered tools."
                                   disabled={!currentLLMSupportsImageOutput}
                                   disabledTooltip={
                                     !currentLLMSupportsImageOutput
-                                      ? "To use Image Generation, select GPT-4 or another image compatible model as the default model for this Assistant."
+                                      ? "To use Image Generation, select GPT-4 or another image compatible model as the default model for this Agent."
                                       : "Image Generation requires an OpenAI or Azure Dall-E configuration."
                                   }
                                 />
@@ -1400,12 +1470,19 @@ export function AssistantEditor({
                   <LLMSelector
                     llmProviders={llmProviders}
                     currentLlm={
-                      values.llm_model_version_override
-                        ? structureValue(
-                            values.llm_model_provider_override,
-                            "",
-                            values.llm_model_version_override
-                          )
+                      values.llm_model_version_override &&
+                      values.llm_model_provider_override
+                        ? (() => {
+                            const provider = llmProviders.find(
+                              (p) =>
+                                p.name === values.llm_model_provider_override
+                            );
+                            return structureValue(
+                              values.llm_model_provider_override,
+                              provider?.provider || "",
+                              values.llm_model_version_override
+                            );
+                          })()
                         : null
                     }
                     requiresImageGeneration={
@@ -1418,7 +1495,7 @@ export function AssistantEditor({
                         setFieldValue("llm_model_version_override", null);
                         setFieldValue("llm_model_provider_override", null);
                       } else {
-                        const { modelName, provider, name } =
+                        const { modelName, name } =
                           parseLlmDescriptor(selected);
                         if (modelName && name) {
                           setFieldValue(
@@ -1449,8 +1526,8 @@ export function AssistantEditor({
                             }
                           }}
                           name="is_default_persona"
-                          label="Featured Assistant"
-                          subtext="If set, this assistant will be pinned for all new users and appear in the Featured list in the assistant explorer. This also makes the assistant public."
+                          label="Featured Agent"
+                          subtext="If set, this agent will be pinned for all new users and appear in the Featured list in the agent explorer. This also makes the agent public."
                         />
                       )}
 
@@ -1460,53 +1537,43 @@ export function AssistantEditor({
                         <div className="block font-medium text-sm">Access</div>
                       </div>
                       <SubLabel>
-                        Control who can access and use this assistant
+                        Control who can access and use this agent
                       </SubLabel>
 
                       <div className="min-h-[100px]">
                         <div className="flex items-center mb-2">
-                          <TooltipProvider>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <div>
-                                  <SwitchField
-                                    name="is_public"
-                                    size="md"
-                                    onCheckedChange={(checked) => {
-                                      if (
-                                        values.is_default_persona &&
-                                        !checked
-                                      ) {
-                                        setShowVisibilityWarning(true);
-                                      } else {
-                                        setFieldValue("is_public", checked);
-                                        if (!checked) {
-                                          // Even though this code path should not be possible,
-                                          // we set the default persona to false to be safe
-                                          setFieldValue(
-                                            "is_default_persona",
-                                            false
-                                          );
-                                        }
-                                        if (checked) {
-                                          setFieldValue("selectedUsers", []);
-                                          setFieldValue("selectedGroups", []);
-                                        }
-                                      }
-                                    }}
-                                    disabled={values.is_default_persona}
-                                  />
-                                </div>
-                              </TooltipTrigger>
-                              {values.is_default_persona && (
-                                <TooltipContent side="top" align="center">
-                                  Default persona must be public. Set
-                                  &quot;Default Persona&quot; to false to change
-                                  visibility.
-                                </TooltipContent>
-                              )}
-                            </Tooltip>
-                          </TooltipProvider>
+                          <SimpleTooltip
+                            tooltip='Default persona must be public. Set "Default Persona" to false to change visibility.'
+                            disabled={!values.is_default_persona}
+                            side="top"
+                          >
+                            <div>
+                              <SwitchField
+                                name="is_public"
+                                size="md"
+                                onCheckedChange={(checked) => {
+                                  if (values.is_default_persona && !checked) {
+                                    setShowVisibilityWarning(true);
+                                  } else {
+                                    setFieldValue("is_public", checked);
+                                    if (!checked) {
+                                      // Even though this code path should not be possible,
+                                      // we set the default persona to false to be safe
+                                      setFieldValue(
+                                        "is_default_persona",
+                                        false
+                                      );
+                                    }
+                                    if (checked) {
+                                      setFieldValue("selectedUsers", []);
+                                      setFieldValue("selectedGroups", []);
+                                    }
+                                  }
+                                }}
+                                disabled={values.is_default_persona}
+                              />
+                            </div>
+                          </SimpleTooltip>
                           <span className="text-sm ml-2">
                             Organization Public
                           </span>
@@ -1524,13 +1591,13 @@ export function AssistantEditor({
 
                         {values.is_public ? (
                           <p className="text-sm text-text-dark">
-                            This assistant will be available to everyone in your
+                            This agent will be available to everyone in your
                             organization
                           </p>
                         ) : (
                           <>
                             <p className="text-sm text-text-dark mb-2">
-                              This assistant will only be available to specific
+                              This agent will only be available to specific
                               users and groups
                             </p>
                             <div className="mt-2">
@@ -1642,9 +1709,8 @@ export function AssistantEditor({
 
                       <SubLabel>
                         Sample messages that help users understand what this
-                        assistant can do and how to interact with it
-                        effectively. New input fields will appear automatically
-                        as you type.
+                        agent can do and how to interact with it effectively.
+                        New input fields will appear automatically as you type.
                       </SubLabel>
 
                       <div className="w-full">
@@ -1677,7 +1743,7 @@ export function AssistantEditor({
                         className="text-sm text-subtle"
                         style={{ color: "rgb(113, 114, 121)" }}
                       >
-                        Select labels to categorize this assistant
+                        Select labels to categorize this agent
                       </p>
                       <div className="mt-3">
                         <SearchMultiSelectDropdown
@@ -1822,7 +1888,7 @@ export function AssistantEditor({
                       removeIndent
                       name="datetime_aware"
                       label="Date and Time Aware"
-                      subtext='Toggle this option to let the assistant know the current date and time (formatted like: "Thursday Jan 1, 1970 00:01"). To inject it in a specific place in the prompt, use the pattern [[CURRENT_DATETIME]]'
+                      subtext='Toggle this option to let the agent know the current date and time (formatted like: "Thursday Jan 1, 1970 00:01"). To inject it in a specific place in the prompt, use the pattern [[CURRENT_DATETIME]]'
                     />
 
                     <Separator />
@@ -1834,48 +1900,45 @@ export function AssistantEditor({
                 <div className="mt-12 w-full flex justify-between items-center">
                   <div>
                     {existingPersona && (
-                      <Button
-                        variant="destructive"
-                        onClick={openDeleteModal}
-                        type="button"
-                      >
+                      <Button danger onClick={openDeleteModal}>
                         Delete
                       </Button>
                     )}
                   </div>
-                  <div className="flex gap-x-4 items-center">
+                  <div className="flex gap-x-2 items-center">
                     <Button
+                      disabled={
+                        isSubmitting ||
+                        isRequestSuccessful ||
+                        (values.user_file_ids || []).some(
+                          (id: string) =>
+                            id.startsWith("temp_") || id.includes("temp_")
+                        )
+                      }
                       type="submit"
-                      disabled={isSubmitting || isRequestSuccessful}
                     >
                       {isUpdate ? "Update" : "Create"}
                     </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => router.back()}
-                    >
+                    <Button secondary onClick={() => router.back()}>
                       Cancel
                     </Button>
                   </div>
                 </div>
               </Form>
-              <Dialog
-                open={showAllUserFiles}
-                onOpenChange={setShowAllUserFiles}
-              >
-                <DialogContent className="w-full max-w-lg">
-                  <DialogHeader>
-                    <OpenFolderIcon size={32} />
-                    <DialogTitle>User Files</DialogTitle>
-                    <DialogDescription>
-                      All files selected for this assistant
-                    </DialogDescription>
-                  </DialogHeader>
-                  <FilesList
+              {showAllUserFiles && (
+                <CoreModal
+                  className="w-full max-w-lg"
+                  onClickOutside={() => setShowAllUserFiles(false)}
+                >
+                  <UserFilesModalContent
+                    title="User Files"
+                    description="All files selected for this assistant"
+                    icon={SvgFiles}
                     recentFiles={values.user_file_ids.map(
                       (userFileId: string) => {
-                        const rf = recentFiles.find((f) => f.id === userFileId);
+                        const rf = allRecentFiles.find(
+                          (f) => f.id === userFileId
+                        );
                         return (
                           rf || {
                             id: userFileId,
@@ -1885,8 +1948,7 @@ export function AssistantEditor({
                         );
                       }
                     )}
-                    showRemove
-                    onRemove={(file) => {
+                    onDelete={(file) => {
                       setFieldValue(
                         "user_file_ids",
                         values.user_file_ids.filter(
@@ -1894,9 +1956,10 @@ export function AssistantEditor({
                         )
                       );
                     }}
+                    onClose={() => setShowAllUserFiles(false)}
                   />
-                </DialogContent>
-              </Dialog>
+                </CoreModal>
+              )}
             </>
           );
         }}

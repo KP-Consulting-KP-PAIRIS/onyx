@@ -15,15 +15,16 @@ import {
   FileChatDisplay,
   Message,
   MessageResponseIDInfo,
+  ResearchType,
   RetrievalType,
   StreamingError,
   ToolCallMetadata,
   UserKnowledgeFilePacket,
 } from "../interfaces";
-import { MinimalPersonaSnapshot } from "../../admin/assistants/interfaces";
+import { MinimalPersonaSnapshot } from "@/app/admin/assistants/interfaces";
 import { ReadonlyURLSearchParams } from "next/navigation";
 import { SEARCH_PARAM_NAMES } from "./searchParams";
-import { Settings } from "../../admin/settings/interfaces";
+import { Settings } from "@/app/admin/settings/interfaces";
 import {
   IMAGE_GENERATION_TOOL_ID,
   WEB_SEARCH_TOOL_ID,
@@ -310,6 +311,20 @@ export async function handleChatFeedback(
   });
   return response;
 }
+
+export async function removeChatFeedback(messageId: number) {
+  const response = await fetch(
+    `/api/chat/remove-chat-message-feedback?chat_message_id=${messageId}`,
+    {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    }
+  );
+  return response;
+}
+
 export async function renameChatSession(
   chatSessionId: string,
   newName: string
@@ -484,7 +499,7 @@ export function processRawChatHistory(
 
   let assistantMessageInd = 0;
 
-  rawMessages.forEach((messageInfo, ind) => {
+  rawMessages.forEach((messageInfo, _ind) => {
     const packetsForMessage = packets[assistantMessageInd];
     if (messageInfo.message_type === "assistant") {
       assistantMessageInd++;
@@ -520,6 +535,7 @@ export function processRawChatHistory(
       ...(messageInfo.message_type === "assistant"
         ? {
             retrievalType: retrievalType,
+            researchType: messageInfo.research_type as ResearchType | undefined,
             query: messageInfo.rephrased_query,
             documents: messageInfo?.context_docs?.top_documents || [],
             citations: messageInfo?.citations || {},
@@ -531,6 +547,7 @@ export function processRawChatHistory(
       latestChildNodeId: messageInfo.latest_child_message,
       overridden_model: messageInfo.overridden_model,
       packets: packetsForMessage || [],
+      currentFeedback: messageInfo.current_feedback as FeedbackType | null,
     };
 
     messages.set(messageInfo.message_id, message);
@@ -605,6 +622,7 @@ const PARAMS_TO_SKIP = [
   // only use these if explicitly passed in
   SEARCH_PARAM_NAMES.CHAT_ID,
   SEARCH_PARAM_NAMES.PERSONA_ID,
+  SEARCH_PARAM_NAMES.PROJECT_ID,
   // do not persist project context in the URL after navigation
   "projectid",
 ];
@@ -677,9 +695,9 @@ export function useScrollonStream({
   enableAutoScroll,
 }: {
   chatState: ChatState;
-  scrollableDivRef: RefObject<HTMLDivElement>;
+  scrollableDivRef: RefObject<HTMLDivElement | null>;
   scrollDist: MutableRefObject<number>;
-  endDivRef: RefObject<HTMLDivElement>;
+  endDivRef: RefObject<HTMLDivElement | null>;
   debounceNumber: number;
   mobile?: boolean;
   enableAutoScroll?: boolean;

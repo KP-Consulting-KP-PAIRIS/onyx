@@ -23,11 +23,7 @@ class EvalConfiguration(BaseModel):
 
 
 class EvalConfigurationOptions(BaseModel):
-    builtin_tool_types: list[str] = list(
-        tool_name
-        for tool_name in BUILT_IN_TOOL_MAP.keys()
-        if tool_name != "OktaProfileTool"
-    )
+    builtin_tool_types: list[str] = list(BUILT_IN_TOOL_MAP.keys())
     persona_override_config: PersonaOverrideConfig | None = None
     llm: LLMOverride = LLMOverride(
         model_provider="Default",
@@ -36,6 +32,7 @@ class EvalConfigurationOptions(BaseModel):
     )
     search_permissions_email: str
     dataset_name: str
+    no_send_logs: bool = False
 
     def get_configuration(self, db_session: Session) -> EvalConfiguration:
         persona_override_config = self.persona_override_config or PersonaOverrideConfig(

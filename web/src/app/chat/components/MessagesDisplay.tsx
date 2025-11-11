@@ -5,7 +5,7 @@ import { MemoizedHumanMessage } from "../message/MemoizedHumanMessage";
 import { ErrorBanner } from "../message/Resubmit";
 import { FeedbackType } from "@/app/chat/interfaces";
 import { MinimalPersonaSnapshot } from "@/app/admin/assistants/interfaces";
-import { LlmDescriptor } from "@/lib/hooks";
+import { LlmDescriptor, LlmManager } from "@/lib/hooks";
 import { EnterpriseSettings } from "@/app/admin/settings/interfaces";
 import { FileDescriptor } from "@/app/chat/interfaces";
 import { MemoizedAIMessage } from "../message/messageComponents/MemoizedAIMessage";
@@ -15,11 +15,16 @@ interface MessagesDisplayProps {
   messageHistory: Message[];
   completeMessageTree: Map<number, Message> | null | undefined;
   liveAssistant: MinimalPersonaSnapshot;
-  llmManager: { currentLlm: LlmDescriptor | null };
+  llmManager: LlmManager;
   deepResearchEnabled: boolean;
   currentMessageFiles: ProjectFile[];
   setPresentingDocument: (doc: MinimalOnyxDocument | null) => void;
-  setCurrentFeedback: (feedback: [FeedbackType, number] | null) => void;
+  handleFeedbackChange: (
+    messageId: number,
+    newFeedback: FeedbackType | null,
+    feedbackText?: string,
+    predefinedFeedback?: string
+  ) => Promise<void>;
   onSubmit: (args: {
     message: string;
     messageIdToResend?: number;
@@ -43,9 +48,9 @@ interface MessagesDisplayProps {
   handleResubmitLastMessage: () => void;
   autoScrollEnabled: boolean;
   getContainerHeight: () => string | undefined;
-  lastMessageRef: RefObject<HTMLDivElement>;
-  endPaddingRef: RefObject<HTMLDivElement>;
-  endDivRef: RefObject<HTMLDivElement>;
+  lastMessageRef: RefObject<HTMLDivElement | null>;
+  endPaddingRef: RefObject<HTMLDivElement | null>;
+  endDivRef: RefObject<HTMLDivElement | null>;
   hasPerformedInitialScroll: boolean;
   chatSessionId: string | null;
   enterpriseSettings?: EnterpriseSettings | null;
@@ -59,7 +64,7 @@ export const MessagesDisplay: React.FC<MessagesDisplayProps> = ({
   deepResearchEnabled,
   currentMessageFiles,
   setPresentingDocument,
-  setCurrentFeedback,
+  handleFeedbackChange,
   onSubmit,
   onMessageSelection,
   stopGenerating,
@@ -99,18 +104,11 @@ export const MessagesDisplay: React.FC<MessagesDisplayProps> = ({
     [onSubmit, deepResearchEnabled, currentMessageFiles]
   );
 
-  const handleFeedback = useCallback(
-    (feedback: FeedbackType, messageId: number) => {
-      setCurrentFeedback([feedback, messageId!]);
-    },
-    [setCurrentFeedback]
-  );
-
   const handleEditWithMessageId = useCallback(
-    (editedContent: string, msgId: number | null | undefined) => {
+    (editedContent: string, msgId: number) => {
       onSubmit({
         message: editedContent,
-        messageIdToResend: msgId || undefined,
+        messageIdToResend: msgId,
         currentMessageFiles: [],
         useAgentSearch: deepResearchEnabled,
       });
@@ -143,7 +141,6 @@ export const MessagesDisplay: React.FC<MessagesDisplayProps> = ({
           return (
             <div id={messageReactComponentKey} key={messageReactComponentKey}>
               <MemoizedHumanMessage
-                setPresentingDocument={setPresentingDocument}
                 disableSwitchingForStreaming={
                   (nextMessage && nextMessage.is_generating) || false
                 }
@@ -151,7 +148,6 @@ export const MessagesDisplay: React.FC<MessagesDisplayProps> = ({
                 content={message.message}
                 files={message.files}
                 messageId={message.messageId}
-                nodeId={message.nodeId}
                 handleEditWithMessageId={handleEditWithMessageId}
                 otherMessagesCanSwitchTo={
                   parentMessage?.childrenNodeIds ?? emptyChildrenIds
@@ -191,7 +187,7 @@ export const MessagesDisplay: React.FC<MessagesDisplayProps> = ({
             >
               <MemoizedAIMessage
                 rawPackets={message.packets}
-                handleFeedbackWithMessageId={handleFeedback}
+                handleFeedbackChange={handleFeedbackChange}
                 assistant={liveAssistant}
                 docs={message.documents ?? emptyDocs}
                 citations={message.citations}
@@ -199,12 +195,15 @@ export const MessagesDisplay: React.FC<MessagesDisplayProps> = ({
                 createRegenerator={createRegenerator}
                 parentMessage={previousMessage!}
                 messageId={message.messageId}
+                currentFeedback={message.currentFeedback}
                 overriddenModel={llmManager.currentLlm?.modelName}
                 nodeId={message.nodeId}
+                llmManager={llmManager}
                 otherMessagesCanSwitchTo={
                   parentMessage?.childrenNodeIds ?? emptyChildrenIds
                 }
                 onMessageSelection={onMessageSelection}
+                researchType={message.researchType}
               />
             </div>
           );

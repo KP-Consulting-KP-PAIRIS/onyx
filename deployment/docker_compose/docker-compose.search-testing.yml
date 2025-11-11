@@ -50,7 +50,7 @@ services:
     build:
       context: ../../backend
       dockerfile: Dockerfile
-    command: /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+    command: /app/scripts/supervisord_entrypoint.sh
     depends_on:
       - relational_db
       - index
@@ -59,6 +59,7 @@ services:
     env_file:
       - .env_eval
     environment:
+      - USE_LIGHTWEIGHT_BACKGROUND_WORKER=${USE_LIGHTWEIGHT_BACKGROUND_WORKER:-true}
       - AUTH_TYPE=disabled
       - POSTGRES_HOST=relational_db
       - VESPA_HOST=index
@@ -246,6 +247,9 @@ services:
     # docker silently mounts /data even without an explicit volume mount, which enables
     # persistence. explicitly setting save and appendonly forces ephemeral behavior.
     command: redis-server --save "" --appendonly no
+    # Use tmpfs to prevent creation of anonymous volumes for /data
+    tmpfs:
+      - /data
 
 volumes:
   inference_model_cache_huggingface:

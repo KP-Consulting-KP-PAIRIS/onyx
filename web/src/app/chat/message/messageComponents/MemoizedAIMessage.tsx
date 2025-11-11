@@ -2,8 +2,8 @@ import React, { useCallback, useMemo } from "react";
 import { MinimalPersonaSnapshot } from "@/app/admin/assistants/interfaces";
 import { FeedbackType, Message, CitationMap } from "../../interfaces";
 import { OnyxDocument, MinimalOnyxDocument } from "@/lib/search/interfaces";
-import { AIMessage } from "./AIMessage";
-import { LlmDescriptor } from "@/lib/hooks";
+import AIMessage from "./AIMessage";
+import { LlmDescriptor, LlmManager } from "@/lib/hooks";
 import { ProjectFile } from "@/app/chat/projects/projectsService";
 
 interface BaseMemoizedAIMessageProps {
@@ -14,14 +14,22 @@ interface BaseMemoizedAIMessageProps {
   setPresentingDocument: (doc: MinimalOnyxDocument | null) => void;
   overriddenModel?: string;
   nodeId: number;
+  messageId?: number;
+  currentFeedback?: FeedbackType | null;
   otherMessagesCanSwitchTo: number[];
   onMessageSelection: (messageId: number) => void;
+  llmManager: LlmManager | null;
   projectFiles?: ProjectFile[];
+  researchType?: string | null;
 }
 
 interface InternalMemoizedAIMessageProps extends BaseMemoizedAIMessageProps {
   regenerate?: (modelOverride: LlmDescriptor) => Promise<void>;
-  handleFeedback: (feedback: FeedbackType) => void;
+  handleFeedbackChange: (
+    newFeedback: FeedbackType | null,
+    feedbackText?: string,
+    predefinedFeedback?: string
+  ) => Promise<void>;
 }
 
 interface MemoizedAIMessageProps extends BaseMemoizedAIMessageProps {
@@ -30,35 +38,38 @@ interface MemoizedAIMessageProps extends BaseMemoizedAIMessageProps {
     parentMessage: Message;
     forceSearch?: boolean;
   }) => (modelOverRide: LlmDescriptor) => Promise<void>;
-  handleFeedbackWithMessageId: (
-    feedback: FeedbackType,
-    messageId: number
-  ) => void;
+  handleFeedbackChange: (
+    messageId: number,
+    newFeedback: FeedbackType | null,
+    feedbackText?: string,
+    predefinedFeedback?: string
+  ) => Promise<void>;
   messageId: number | undefined;
   parentMessage?: Message;
 }
 
-const _MemoizedAIMessage = React.memo(function _MemoizedAIMessage({
-  rawPackets,
-  handleFeedback,
-  assistant,
-  docs,
-  citations,
-  setPresentingDocument,
-  regenerate,
-  overriddenModel,
-  nodeId,
-  otherMessagesCanSwitchTo,
-  onMessageSelection,
-  projectFiles,
-}: InternalMemoizedAIMessageProps & {
-  projectFiles?: ProjectFile[];
-}) {
-  return (
-    <AIMessage
-      rawPackets={rawPackets}
-      chatState={{
-        handleFeedback,
+const InternalMemoizedAIMessage = React.memo(
+  function InternalMemoizedAIMessage({
+    rawPackets,
+    handleFeedbackChange,
+    assistant,
+    docs,
+    citations,
+    setPresentingDocument,
+    regenerate,
+    overriddenModel,
+    nodeId,
+    messageId,
+    currentFeedback,
+    otherMessagesCanSwitchTo,
+    onMessageSelection,
+    llmManager,
+    projectFiles,
+    researchType,
+  }: InternalMemoizedAIMessageProps) {
+    const chatState = React.useMemo(
+      () => ({
+        handleFeedbackChange,
         assistant,
         docs,
         userFiles: projectFiles || [],
@@ -66,17 +77,39 @@ const _MemoizedAIMessage = React.memo(function _MemoizedAIMessage({
         setPresentingDocument,
         regenerate,
         overriddenModel,
-      }}
-      nodeId={nodeId}
-      otherMessagesCanSwitchTo={otherMessagesCanSwitchTo}
-      onMessageSelection={onMessageSelection}
-    />
-  );
-});
+        researchType,
+      }),
+      [
+        handleFeedbackChange,
+        assistant,
+        docs,
+        projectFiles,
+        citations,
+        setPresentingDocument,
+        regenerate,
+        overriddenModel,
+        researchType,
+      ]
+    );
+
+    return (
+      <AIMessage
+        rawPackets={rawPackets}
+        chatState={chatState}
+        nodeId={nodeId}
+        messageId={messageId}
+        currentFeedback={currentFeedback}
+        llmManager={llmManager}
+        otherMessagesCanSwitchTo={otherMessagesCanSwitchTo}
+        onMessageSelection={onMessageSelection}
+      />
+    );
+  }
+);
 
 export const MemoizedAIMessage = ({
   rawPackets,
-  handleFeedbackWithMessageId,
+  handleFeedbackChange,
   assistant,
   docs,
   citations,
@@ -85,13 +118,14 @@ export const MemoizedAIMessage = ({
   overriddenModel,
   nodeId,
   messageId,
+  currentFeedback,
   parentMessage,
   otherMessagesCanSwitchTo,
   onMessageSelection,
+  llmManager,
   projectFiles,
-}: MemoizedAIMessageProps & {
-  projectFiles?: ProjectFile[];
-}) => {
+  researchType,
+}: MemoizedAIMessageProps) => {
   const regenerate = useMemo(() => {
     if (messageId === undefined) {
       return undefined;
@@ -109,21 +143,31 @@ export const MemoizedAIMessage = ({
     };
   }, [messageId, parentMessage, createRegenerator]);
 
-  const handleFeedback = useCallback(
-    (feedback: FeedbackType) => {
+  // Wrap handleFeedbackChange to pass messageId
+  const wrappedHandleFeedbackChange = useCallback(
+    async (
+      newFeedback: FeedbackType | null,
+      feedbackText?: string,
+      predefinedFeedback?: string
+    ) => {
       if (messageId === undefined) {
-        console.error("Message has no messageId", nodeId);
+        console.error("Message has no messageId");
         return;
       }
-      handleFeedbackWithMessageId(feedback, messageId!);
+      return handleFeedbackChange(
+        messageId,
+        newFeedback,
+        feedbackText,
+        predefinedFeedback
+      );
     },
-    [handleFeedbackWithMessageId, messageId]
+    [handleFeedbackChange, messageId]
   );
 
   return (
-    <_MemoizedAIMessage
+    <InternalMemoizedAIMessage
       rawPackets={rawPackets}
-      handleFeedback={handleFeedback}
+      handleFeedbackChange={wrappedHandleFeedbackChange}
       assistant={assistant}
       docs={docs}
       citations={citations}
@@ -131,9 +175,13 @@ export const MemoizedAIMessage = ({
       regenerate={regenerate}
       overriddenModel={overriddenModel}
       nodeId={nodeId}
+      messageId={messageId}
+      currentFeedback={currentFeedback}
       otherMessagesCanSwitchTo={otherMessagesCanSwitchTo}
       onMessageSelection={onMessageSelection}
+      llmManager={llmManager}
       projectFiles={projectFiles}
+      researchType={researchType}
     />
   );
 };

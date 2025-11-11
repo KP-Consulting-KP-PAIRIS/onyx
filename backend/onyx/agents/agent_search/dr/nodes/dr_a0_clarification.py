@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 from typing import cast
 
+from braintrust import traced
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import merge_content
 from langchain_core.runnables import RunnableConfig
@@ -22,6 +23,9 @@ from onyx.agents.agent_search.dr.models import DecisionResponse
 from onyx.agents.agent_search.dr.models import DRPromptPurpose
 from onyx.agents.agent_search.dr.models import OrchestrationClarificationInfo
 from onyx.agents.agent_search.dr.models import OrchestratorTool
+from onyx.agents.agent_search.dr.process_llm_stream import (
+    BasicSearchProcessedStreamResults,
+)
 from onyx.agents.agent_search.dr.process_llm_stream import process_llm_stream
 from onyx.agents.agent_search.dr.states import MainState
 from onyx.agents.agent_search.dr.states import OrchestrationSetup
@@ -37,6 +41,7 @@ from onyx.agents.agent_search.shared_graph_utils.utils import write_custom_event
 from onyx.agents.agent_search.utils import create_question_prompt
 from onyx.chat.chat_utils import build_citation_map_from_numbers
 from onyx.chat.chat_utils import saved_search_docs_from_llm_docs
+from onyx.chat.memories import get_memories
 from onyx.chat.models import PromptConfig
 from onyx.chat.prompt_builder.citations_prompt import build_citations_system_message
 from onyx.chat.prompt_builder.citations_prompt import build_citations_user_message
@@ -70,6 +75,8 @@ from onyx.prompts.dr_prompts import DEFAULT_DR_SYSTEM_PROMPT
 from onyx.prompts.dr_prompts import REPEAT_PROMPT
 from onyx.prompts.dr_prompts import TOOL_DESCRIPTION
 from onyx.prompts.prompt_template import PromptTemplate
+from onyx.prompts.prompt_utils import handle_company_awareness
+from onyx.prompts.prompt_utils import handle_memories
 from onyx.server.query_and_chat.streaming_models import MessageStart
 from onyx.server.query_and_chat.streaming_models import OverallStop
 from onyx.server.query_and_chat.streaming_models import SectionEnd
@@ -91,14 +98,6 @@ from onyx.utils.logger import setup_logger
 logger = setup_logger()
 
 
-def _format_tool_name(tool_name: str) -> str:
-    """Convert tool name to LLM-friendly format."""
-    name = tool_name.replace(" ", "_")
-    # take care of camel case like GetAPIKey -> GET_API_KEY for LLM readability
-    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", name)
-    return name.upper()
-
-
 def _get_available_tools(
     db_session: Session,
     graph_config: GraphConfig,
@@ -116,7 +115,9 @@ def _get_available_tools(
     else:
         include_kg = False
 
-    tool_dict: dict[int, Tool] = {tool.id: tool for tool in get_tools(db_session)}
+    tool_dict: dict[int, Tool] = {
+        tool.id: tool for tool in get_tools(db_session, only_enabled=True)
+    }
 
     for tool in graph_config.tooling.tools:
 
@@ -484,6 +485,14 @@ def clarifier(
             + PROJECT_INSTRUCTIONS_SEPARATOR
             + graph_config.inputs.project_instructions
         )
+    user = (
+        graph_config.tooling.search_tool.user
+        if graph_config.tooling.search_tool
+        else None
+    )
+    memories = get_memories(user, db_session)
+    assistant_system_prompt = handle_company_awareness(assistant_system_prompt)
+    assistant_system_prompt = handle_memories(assistant_system_prompt, memories)
 
     chat_history_string = (
         get_chat_history_string(
@@ -543,7 +552,7 @@ def clarifier(
                 # if there is only one tool (Closer), we don't need to decide. It's an LLM answer
                 llm_decision = DecisionResponse(decision="LLM", reasoning="")
 
-            if llm_decision.decision == "LLM":
+            if llm_decision.decision == "LLM" and research_type != ResearchType.DEEP:
 
                 write_custom_event(
                     current_step_nr,
@@ -635,11 +644,14 @@ def clarifier(
             if context_llm_docs:
                 persona = graph_config.inputs.persona
                 if persona is not None:
-                    prompt_config = PromptConfig.from_model(persona)
+                    prompt_config = PromptConfig.from_model(
+                        persona, db_session=graph_config.persistence.db_session
+                    )
                 else:
                     prompt_config = PromptConfig(
-                        system_prompt=assistant_system_prompt,
-                        task_prompt="",
+                        default_behavior_system_prompt=assistant_system_prompt,
+                        custom_instructions=None,
+                        reminder="",
                         datetime_aware=True,
                     )
 
@@ -666,70 +678,75 @@ def clarifier(
                 system_prompt_to_use = assistant_system_prompt
                 user_prompt_to_use = decision_prompt + assistant_task_prompt
 
-            stream = graph_config.tooling.primary_llm.stream(
-                prompt=create_question_prompt(
-                    cast(str, system_prompt_to_use),
-                    cast(str, user_prompt_to_use),
-                    uploaded_image_context=uploaded_image_context,
-                ),
-                tools=([_ARTIFICIAL_ALL_ENCOMPASSING_TOOL]),
-                tool_choice=(None),
-                structured_response_format=graph_config.inputs.structured_response_format,
-            )
+            @traced(name="clarifier stream and process", type="llm")
+            def stream_and_process() -> BasicSearchProcessedStreamResults:
+                stream = graph_config.tooling.primary_llm.stream(
+                    prompt=create_question_prompt(
+                        cast(str, system_prompt_to_use),
+                        cast(str, user_prompt_to_use),
+                        uploaded_image_context=uploaded_image_context,
+                    ),
+                    tools=([_ARTIFICIAL_ALL_ENCOMPASSING_TOOL]),
+                    tool_choice=(None),
+                    structured_response_format=graph_config.inputs.structured_response_format,
+                )
+                return process_llm_stream(
+                    messages=stream,
+                    should_stream_answer=True,
+                    writer=writer,
+                    ind=0,
+                    search_results=context_llm_docs,
+                    generate_final_answer=True,
+                    chat_message_id=str(graph_config.persistence.chat_session_id),
+                )
 
-            full_response = process_llm_stream(
-                messages=stream,
-                should_stream_answer=True,
-                writer=writer,
-                ind=0,
-                final_search_results=context_llm_docs,
-                displayed_search_results=context_llm_docs,
-                generate_final_answer=True,
-                chat_message_id=str(graph_config.persistence.chat_session_id),
-            )
+            # Deep research always continues to clarification or search
+            if research_type != ResearchType.DEEP:
+                full_response = stream_and_process()
+                if len(full_response.ai_message_chunk.tool_calls) == 0:
 
-            if len(full_response.ai_message_chunk.tool_calls) == 0:
+                    if isinstance(full_response.full_answer, str):
+                        full_answer = (
+                            normalize_square_bracket_citations_to_double_with_links(
+                                full_response.full_answer
+                            )
+                        )
+                    else:
+                        full_answer = None
 
-                if isinstance(full_response.full_answer, str):
-                    full_answer = (
-                        normalize_square_bracket_citations_to_double_with_links(
-                            full_response.full_answer
+                    # Persist final documents and derive citations when using in-context docs
+                    final_documents_db, citations_map = (
+                        _persist_final_docs_and_citations(
+                            db_session=db_session,
+                            context_llm_docs=context_llm_docs,
+                            full_answer=full_answer,
                         )
                     )
-                else:
-                    full_answer = None
 
-                # Persist final documents and derive citations when using in-context docs
-                final_documents_db, citations_map = _persist_final_docs_and_citations(
-                    db_session=db_session,
-                    context_llm_docs=context_llm_docs,
-                    full_answer=full_answer,
-                )
+                    update_db_session_with_messages(
+                        db_session=db_session,
+                        chat_message_id=message_id,
+                        chat_session_id=graph_config.persistence.chat_session_id,
+                        is_agentic=graph_config.behavior.use_agentic_search,
+                        message=full_answer,
+                        token_count=len(llm_tokenizer.encode(full_answer or "")),
+                        citations=citations_map,
+                        final_documents=final_documents_db or None,
+                        update_parent_message=True,
+                        research_answer_purpose=ResearchAnswerPurpose.ANSWER,
+                    )
 
-                update_db_session_with_messages(
-                    db_session=db_session,
-                    chat_message_id=message_id,
-                    chat_session_id=graph_config.persistence.chat_session_id,
-                    is_agentic=graph_config.behavior.use_agentic_search,
-                    message=full_answer,
-                    token_count=len(llm_tokenizer.encode(full_answer or "")),
-                    citations=citations_map,
-                    final_documents=final_documents_db or None,
-                    update_parent_message=True,
-                    research_answer_purpose=ResearchAnswerPurpose.ANSWER,
-                )
+                    db_session.commit()
 
-                db_session.commit()
-
-                return OrchestrationSetup(
-                    original_question=original_question,
-                    chat_history_string="",
-                    tools_used=[DRPath.END.value],
-                    query_list=[],
-                    available_tools=available_tools,
-                    assistant_system_prompt=assistant_system_prompt,
-                    assistant_task_prompt=assistant_task_prompt,
-                )
+                    return OrchestrationSetup(
+                        original_question=original_question,
+                        chat_history_string="",
+                        tools_used=[DRPath.END.value],
+                        query_list=[],
+                        available_tools=available_tools,
+                        assistant_system_prompt=assistant_system_prompt,
+                        assistant_task_prompt=assistant_task_prompt,
+                    )
 
         # Continue, as external knowledge is required.
 

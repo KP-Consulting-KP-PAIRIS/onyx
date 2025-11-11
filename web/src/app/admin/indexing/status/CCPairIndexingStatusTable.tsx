@@ -21,23 +21,19 @@ import { useRouter } from "next/navigation";
 import {
   FiChevronDown,
   FiChevronRight,
-  FiSettings,
   FiLock,
   FiUnlock,
   FiRefreshCw,
 } from "react-icons/fi";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import SimpleTooltip from "@/refresh-components/SimpleTooltip";
 import { SourceIcon } from "@/components/SourceIcon";
 import { getSourceDisplayName } from "@/lib/sources";
 import { usePaidEnterpriseFeaturesEnabled } from "@/components/settings/usePaidEnterpriseFeaturesEnabled";
 import { ConnectorCredentialPairStatus } from "../../connector/[ccPairId]/types";
 import { PageSelector } from "@/components/PageSelector";
 import { ConnectorStaggeredSkeleton } from "./ConnectorRowSkeleton";
+import IconButton from "@/refresh-components/buttons/IconButton";
+import SvgSettings from "@/icons/settings";
 
 function isFederatedConnectorStatus(
   status: ConnectorIndexingStatusLite | FederatedConnectorStatus
@@ -195,19 +191,9 @@ function ConnectorRow({
       <TableCell>{ccPairsIndexingStatus.docs_indexed}</TableCell>
       <TableCell>
         {isEditable && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <FiSettings
-                  className="cursor-pointer"
-                  onClick={handleManageClick}
-                />
-              </TooltipTrigger>
-              <TooltipContent>
-                <p>Manage Connector</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <SimpleTooltip tooltip="Manage Connector">
+            <IconButton icon={SvgSettings} tertiary />
+          </SimpleTooltip>
         )}
       </TableCell>
     </TableRow>
@@ -260,19 +246,12 @@ function FederatedConnectorRow({
       )}
       <TableCell>N/A</TableCell>
       <TableCell>
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <FiSettings
-                className="cursor-pointer"
-                onClick={handleManageClick}
-              />
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>Manage Federated Connector</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <IconButton
+          icon={SvgSettings}
+          tertiary
+          onClick={handleManageClick}
+          tooltip="Manage Federated Connector"
+        />
       </TableCell>
     </TableRow>
   );
@@ -319,7 +298,16 @@ export function CCPairIndexingStatusTable({
       <TableBody>
         {ccPairsIndexingStatuses.map((ccPairStatus) => (
           <React.Fragment key={ccPairStatus.source}>
-            <br className="mt-4 dark:bg-neutral-700" />
+            <TableRow className="border-none">
+              <TableCell
+                colSpan={
+                  isPaidEnterpriseFeaturesEnabled
+                    ? NUMBER_OF_COLUMNS
+                    : NUMBER_OF_COLUMNS - 1
+                }
+                className="h-4 p-0"
+              />
+            </TableRow>
             <SummaryRow
               source={ccPairStatus.source}
               summary={ccPairStatus.summary}

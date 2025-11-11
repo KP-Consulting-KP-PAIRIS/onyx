@@ -7,6 +7,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from onyx.db.constants import UNSET
+from onyx.db.constants import UnsetType
 from onyx.db.models import Tool
 from onyx.server.features.tool.models import Header
 from onyx.tools.built_in_tools import BUILT_IN_TOOL_TYPES
@@ -19,16 +21,23 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 
-def get_tools(db_session: Session) -> list[Tool]:
-    return list(db_session.scalars(select(Tool)).all())
+def get_tools(db_session: Session, *, only_enabled: bool = False) -> list[Tool]:
+    query = select(Tool)
+    if only_enabled:
+        query = query.where(Tool.enabled.is_(True))
+    return list(db_session.scalars(query).all())
 
 
-def get_tools_by_mcp_server_id(mcp_server_id: int, db_session: Session) -> list[Tool]:
-    return list(
-        db_session.scalars(
-            select(Tool).where(Tool.mcp_server_id == mcp_server_id)
-        ).all()
-    )
+def get_tools_by_mcp_server_id(
+    mcp_server_id: int,
+    db_session: Session,
+    *,
+    only_enabled: bool = False,
+) -> list[Tool]:
+    query = select(Tool).where(Tool.mcp_server_id == mcp_server_id)
+    if only_enabled:
+        query = query.where(Tool.enabled.is_(True))
+    return list(db_session.scalars(query).all())
 
 
 def get_tool_by_id(tool_id: int, db_session: Session) -> Tool:
@@ -53,6 +62,10 @@ def create_tool__no_commit(
     user_id: UUID | None,
     db_session: Session,
     passthrough_auth: bool,
+    *,
+    mcp_server_id: int | None = None,
+    oauth_config_id: int | None = None,
+    enabled: bool = True,
 ) -> Tool:
     new_tool = Tool(
         name=name,
@@ -64,6 +77,9 @@ def create_tool__no_commit(
         ),
         user_id=user_id,
         passthrough_auth=passthrough_auth,
+        mcp_server_id=mcp_server_id,
+        oauth_config_id=oauth_config_id,
+        enabled=enabled,
     )
     db_session.add(new_tool)
     db_session.flush()  # Don't commit yet, let caller decide when to commit
@@ -79,6 +95,7 @@ def update_tool(
     user_id: UUID | None,
     db_session: Session,
     passthrough_auth: bool | None,
+    oauth_config_id: int | None | UnsetType = UNSET,
 ) -> Tool:
     tool = get_tool_by_id(tool_id, db_session)
     if tool is None:
@@ -98,6 +115,8 @@ def update_tool(
         ]
     if passthrough_auth is not None:
         tool.passthrough_auth = passthrough_auth
+    if not isinstance(oauth_config_id, UnsetType):
+        tool.oauth_config_id = oauth_config_id
     db_session.commit()
 
     return tool

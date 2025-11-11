@@ -33,7 +33,9 @@ export async function sendMessage(page: Page, message: string) {
   await page.locator("#onyx-chat-input-send-button").click();
   await page.waitForSelector('[data-testid="onyx-ai-message"]');
   // Wait for the copy button to appear, which indicates the message is fully rendered
-  await page.waitForSelector('[data-testid="copy-button"]', { timeout: 30000 });
+  await page.waitForSelector('[data-testid="AIMessage/copy-button"]', {
+    timeout: 30000,
+  });
 
   // Wait for up to 10 seconds for the URL to contain 'chatId='
   await page.waitForFunction(
@@ -44,22 +46,26 @@ export async function sendMessage(page: Page, message: string) {
 }
 
 export async function verifyCurrentModel(page: Page, modelName: string) {
-  const chatInput = page.locator("#onyx-chat-input");
-  const text = await chatInput.textContent();
+  const text = await page
+    .getByTestId("ChatInputBar/llm-popover-trigger")
+    .textContent();
   expect(text).toContain(modelName);
 }
 
 // Start of Selection
 export async function switchModel(page: Page, modelName: string) {
-  await page.getByTestId("llm-popover-trigger").click();
-  // Target the button inside the popover content specifically
+  await page.getByTestId("ChatInputBar/llm-popover-trigger").click();
+  // Target the LineItem (now a <div>) inside the popover content specifically
+  // LineItem changed from <button> to <div> to fix hydration errors
   await page
     .locator('[role="dialog"]')
-    .getByRole("button", { name: new RegExp(`${modelName}$`, "i") })
+    .locator("div.cursor-pointer")
+    .filter({ hasText: new RegExp(`${modelName}$`, "i") })
+    .first()
     .click();
 }
 
 export async function startNewChat(page: Page) {
-  await page.getByRole("link", { name: "New Chat" }).click();
-  await expect(page.locator('div[data-testid="chat-intro"]')).toBeVisible();
+  await page.getByTestId("AppSidebar/new-session").click();
+  await expect(page.getByTestId("chat-intro")).toBeVisible();
 }

@@ -33,6 +33,8 @@ from onyx.context.search.models import SearchRequest
 from onyx.context.search.models import UserFileFilters
 from onyx.context.search.pipeline import SearchPipeline
 from onyx.context.search.pipeline import section_relevance_list_impl
+from onyx.db.connector import check_connectors_exist
+from onyx.db.connector import check_federated_connectors_exist
 from onyx.db.models import Persona
 from onyx.db.models import User
 from onyx.llm.interfaces import LLM
@@ -70,14 +72,15 @@ class SearchResponseSummary(SearchQueryInfo):
 
 
 SEARCH_TOOL_DESCRIPTION = """
-Runs a semantic search over the user's knowledge base. The default behavior is to use this tool. \
-The only scenario where you should not use this tool is if:
-
-- There is sufficient information in chat history to FULLY and ACCURATELY answer the query AND \
-additional information or details would provide little or no value.
-- The query is some form of request that does not require additional information to handle.
-
-HINT: if you are unfamiliar with the user input OR think the user input is a typo, use this tool.
+Use the `internal_search` tool to search connected applications for information. Use `internal_search` when:
+- Internal information: any time where there may be some information stored in internal applications that could help better \
+answer the query.
+- Niche/Specific information: information that is likely not found in public sources, things specific to a project or product, \
+team, process, etc.
+- Keyword Queries: queries that are heavily keyword based are often internal document search queries.
+- Ambiguity: questions about something that is not widely known or understood.
+Between internal and web search, think about if the user's query is likely better answered by team internal sources or online \
+web pages. If very ambiguious, prioritize internal search or call both tools.
 """
 
 
@@ -173,6 +176,13 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
         )
 
         self._id = tool_id
+
+    @classmethod
+    def is_available(cls, db_session: Session) -> bool:
+        """Check if search tool is available by verifying connectors exist."""
+        return check_connectors_exist(db_session) or check_federated_connectors_exist(
+            db_session
+        )
 
     @property
     def id(self) -> int:

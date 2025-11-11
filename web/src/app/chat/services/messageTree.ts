@@ -1,4 +1,4 @@
-import { Message } from "../interfaces";
+import { FileDescriptor, Message } from "../interfaces";
 
 export const SYSTEM_MESSAGE_ID = -3;
 export const SYSTEM_NODE_ID = -3;
@@ -408,21 +408,24 @@ export function getLastSuccessfulMessageId(
   return null; // No successful message found
 }
 
-export const buildEmptyMessage = (
-  messageType: "user" | "assistant",
-  parentNodeId: number,
-  message?: string,
-  nodeIdOffset?: number
-): Message => {
+interface BuildEmptyMessageParams {
+  messageType: "user" | "assistant";
+  parentNodeId: number;
+  message?: string;
+  files?: FileDescriptor[];
+  nodeIdOffset?: number;
+}
+
+export const buildEmptyMessage = (params: BuildEmptyMessageParams): Message => {
   // use negative number to avoid conflicts with messageIds
-  const tempNodeId = -1 * Date.now() - (nodeIdOffset || 0);
+  const tempNodeId = -1 * Date.now() - (params.nodeIdOffset || 0);
   return {
     nodeId: tempNodeId,
-    message: message || "",
-    type: messageType,
-    files: [],
+    message: params.message || "",
+    type: params.messageType,
+    files: params.files || [],
     toolCall: null,
-    parentNodeId: parentNodeId,
+    parentNodeId: params.parentNodeId,
     packets: [],
   };
 };
@@ -430,28 +433,29 @@ export const buildEmptyMessage = (
 export const buildImmediateMessages = (
   parentNodeId: number,
   userInput: string,
+  files: FileDescriptor[],
   messageToResend?: Message
 ): {
   initialUserNode: Message;
   initialAssistantNode: Message;
 } => {
-  // When editing a message, create a new node (sibling) rather than updating the existing one
   const initialUserNode = messageToResend
-    ? {
-        ...buildEmptyMessage("user", parentNodeId, userInput), // new node with new ID
-        files: messageToResend.files, // preserve files from original message
-      }
-    : buildEmptyMessage("user", parentNodeId, userInput);
+    ? { ...messageToResend } // clone the message to avoid mutating the original
+    : buildEmptyMessage({
+        messageType: "user",
+        parentNodeId,
+        message: userInput,
+        files,
+      });
+  const initialAssistantNode = buildEmptyMessage({
+    messageType: "assistant",
+    parentNodeId: initialUserNode.nodeId,
+    nodeIdOffset: 1,
+  });
 
-  const initialAssistantNode = buildEmptyMessage(
-    "assistant",
-    initialUserNode.nodeId,
-    undefined,
-    1
-  );
-
-  // New edited message starts fresh with only its assistant response
-  initialUserNode.childrenNodeIds = [initialAssistantNode.nodeId];
+  initialUserNode.childrenNodeIds = initialUserNode.childrenNodeIds
+    ? [...initialUserNode.childrenNodeIds, initialAssistantNode.nodeId]
+    : [initialAssistantNode.nodeId];
   initialUserNode.latestChildNodeId = initialAssistantNode.nodeId;
 
   return {

@@ -1,17 +1,18 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, JSX } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import rehypePrism from "rehype-prism-plus";
+import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
-import "prismjs/themes/prism-tomorrow.css";
 import "katex/dist/katex.min.css";
-import "../custom-code-styles.css";
-
-import { FullChatState } from "./interfaces";
-import { MemoizedAnchor, MemoizedParagraph } from "../MemoizedTextComponents";
-import { extractCodeText, preprocessLaTeX } from "../codeUtils";
-import { CodeBlock } from "../CodeBlock";
+import "@/app/chat/message/custom-code-styles.css";
+import { FullChatState } from "@/app/chat/message/messageComponents/interfaces";
+import {
+  MemoizedAnchor,
+  MemoizedParagraph,
+} from "@/app/chat/message/MemoizedTextComponents";
+import { extractCodeText, preprocessLaTeX } from "@/app/chat/message/codeUtils";
+import { CodeBlock } from "@/app/chat/message/CodeBlock";
 import { transformLinkUri } from "@/lib/utils";
 
 /**
@@ -44,11 +45,16 @@ export const processContent = (content: string): string => {
  */
 export const useMarkdownComponents = (
   state: FullChatState | undefined,
-  processedContent: string
+  processedContent: string,
+  className?: string
 ) => {
   const paragraphCallback = useCallback(
-    (props: any) => <MemoizedParagraph>{props.children}</MemoizedParagraph>,
-    []
+    (props: any) => (
+      <MemoizedParagraph className={className}>
+        {props.children}
+      </MemoizedParagraph>
+    ),
+    [className]
   );
 
   const anchorCallback = useCallback(
@@ -69,8 +75,21 @@ export const useMarkdownComponents = (
     () => ({
       a: anchorCallback,
       p: paragraphCallback,
+      pre: ({ node, className, children }: any) => {
+        // Don't render the pre wrapper - CodeBlock handles its own wrapper
+        return <>{children}</>;
+      },
       b: ({ node, className, children }: any) => {
         return <span className={className}>{children}</span>;
+      },
+      ul: ({ node, className, children }: any) => {
+        return <ul className={`text-text-05 ${className}`}>{children}</ul>;
+      },
+      ol: ({ node, className, children }: any) => {
+        return <ol className={`text-text-05 ${className}`}>{children}</ol>;
+      },
+      li: ({ node, className, children }: any) => {
+        return <li className={className}>{children}</li>;
       },
       code: ({ node, className, children }: any) => {
         const codeText = extractCodeText(node, processedContent, children);
@@ -97,15 +116,20 @@ export const renderMarkdown = (
   textSize: string = "text-base"
 ): JSX.Element => {
   return (
-    <ReactMarkdown
-      className={`prose dark:prose-invert max-w-full ${textSize}`}
-      components={markdownComponents}
-      remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
-      rehypePlugins={[[rehypePrism, { ignoreMissing: true }], rehypeKatex]}
-      urlTransform={transformLinkUri}
-    >
-      {content}
-    </ReactMarkdown>
+    <div dir="auto">
+      <ReactMarkdown
+        className={`prose dark:prose-invert font-main-content-body max-w-full ${textSize}`}
+        components={markdownComponents}
+        remarkPlugins={[
+          remarkGfm,
+          [remarkMath, { singleDollarTextMath: false }],
+        ]}
+        rehypePlugins={[rehypeHighlight, rehypeKatex]}
+        urlTransform={transformLinkUri}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
   );
 };
 
@@ -115,10 +139,14 @@ export const renderMarkdown = (
 export const useMarkdownRenderer = (
   content: string,
   state: FullChatState | undefined,
-  textSize: string = "text-base"
+  textSize: string
 ) => {
   const processedContent = useMemo(() => processContent(content), [content]);
-  const markdownComponents = useMarkdownComponents(state, processedContent);
+  const markdownComponents = useMarkdownComponents(
+    state,
+    processedContent,
+    textSize
+  );
 
   const renderedContent = useMemo(
     () => renderMarkdown(processedContent, markdownComponents, textSize),

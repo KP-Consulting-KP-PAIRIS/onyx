@@ -8,8 +8,8 @@ import Link from "next/link";
 import Text from "@/components/ui/text";
 import { useConnectorIndexingStatusWithPagination } from "@/lib/hooks";
 import { usePopupFromQuery } from "@/components/popup/PopupFromQuery";
-import { Button } from "@/components/ui/button";
-import { useState, useRef, useMemo } from "react";
+import Button from "@/refresh-components/buttons/Button";
+import { useState, useRef, useMemo, RefObject } from "react";
 import { FilterOptions } from "./FilterComponent";
 import { ValidSources } from "@/lib/types";
 import Cookies from "js-cookie";
@@ -169,7 +169,9 @@ function Main() {
         resetPagination={resetPagination}
         onClearFilters={handleClearFilters}
         hasActiveFilters={hasActiveFilters}
-        filterComponentRef={filterComponentRef}
+        filterComponentRef={
+          filterComponentRef as RefObject<{ resetFilters: () => void }>
+        }
       />
 
       {/* Table component */}
@@ -217,9 +219,7 @@ export default function Status() {
         icon={<NotebookIcon size={32} />}
         title="Existing Connectors"
         farRightElement={
-          <Link href="/admin/add-connector">
-            <Button variant="success-reverse">Add Connector</Button>
-          </Link>
+          <Button href="/admin/add-connector">Add Connector</Button>
         }
       />
 

@@ -2,18 +2,24 @@ import re
 import time
 import traceback
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Iterator
 from typing import cast
 from typing import Protocol
 from uuid import UUID
 
+from agents import Model
+from agents import ModelSettings
+from agents.models.openai_responses import OpenAIResponsesModel
+from redis.client import Redis
 from sqlalchemy.orm import Session
 
-from onyx.agents.agent_search.orchestration.nodes.call_tool import ToolCallException
+from onyx.agents.agent_sdk.message_format import base_messages_to_agent_sdk_msgs
 from onyx.chat.answer import Answer
 from onyx.chat.chat_utils import create_chat_chain
 from onyx.chat.chat_utils import create_temporary_persona
 from onyx.chat.chat_utils import process_kg_commands
+from onyx.chat.memories import get_memories
 from onyx.chat.models import AnswerStream
 from onyx.chat.models import AnswerStyleConfig
 from onyx.chat.models import ChatBasicResponse
@@ -26,12 +32,15 @@ from onyx.chat.models import PromptConfig
 from onyx.chat.models import QADocsResponse
 from onyx.chat.models import StreamingError
 from onyx.chat.models import UserKnowledgeFilePacket
-from onyx.chat.packet_proccessing.process_streamed_packets import (
-    process_streamed_packets,
-)
 from onyx.chat.prompt_builder.answer_prompt_builder import AnswerPromptBuilder
 from onyx.chat.prompt_builder.answer_prompt_builder import default_build_system_message
+from onyx.chat.prompt_builder.answer_prompt_builder import (
+    default_build_system_message_v2,
+)
 from onyx.chat.prompt_builder.answer_prompt_builder import default_build_user_message
+from onyx.chat.turn import fast_chat_turn
+from onyx.chat.turn.infra.emitter import get_default_emitter
+from onyx.chat.turn.models import ChatTurnDependencies
 from onyx.chat.user_files.parse_user_files import parse_user_files
 from onyx.configs.chat_configs import CHAT_TARGET_CHUNK_PERCENTAGE
 from onyx.configs.chat_configs import DISABLE_LLM_CHOOSE_SEARCH
@@ -70,18 +79,22 @@ from onyx.db.projects import get_project_instructions
 from onyx.db.projects import get_user_files_from_project
 from onyx.db.search_settings import get_current_search_settings
 from onyx.document_index.factory import get_default_document_index
+from onyx.feature_flags.factory import get_default_feature_flag_provider
+from onyx.feature_flags.feature_flags_keys import DISABLE_SIMPLE_AGENT_FRAMEWORK
 from onyx.file_store.models import FileDescriptor
 from onyx.file_store.models import InMemoryChatFile
 from onyx.file_store.utils import build_frontend_file_url
 from onyx.file_store.utils import load_all_chat_files
 from onyx.kg.models import KGException
 from onyx.llm.exceptions import GenAIDisabledException
+from onyx.llm.factory import get_llm_model_and_settings_for_persona
 from onyx.llm.factory import get_llms_for_persona
 from onyx.llm.factory import get_main_llm_from_tuple
 from onyx.llm.interfaces import LLM
 from onyx.llm.models import PreviousMessage
 from onyx.llm.utils import litellm_exception_to_error_msg
 from onyx.natural_language_processing.utils import get_tokenizer
+from onyx.redis.redis_pool import get_redis_client
 from onyx.server.query_and_chat.models import CreateChatMessageRequest
 from onyx.server.query_and_chat.streaming_models import CitationDelta
 from onyx.server.query_and_chat.streaming_models import CitationInfo
@@ -101,6 +114,7 @@ from onyx.tools.tool_implementations.search.search_tool import SearchTool
 from onyx.tools.tool_implementations.web_search.web_search_tool import (
     WebSearchTool,
 )
+from onyx.tools.utils import compute_all_tool_tokens
 from onyx.utils.logger import setup_logger
 from onyx.utils.long_term_log import LongTermLogger
 from onyx.utils.telemetry import mt_cloud_telemetry
@@ -108,9 +122,12 @@ from onyx.utils.timing import log_function_time
 from onyx.utils.timing import log_generator_function_time
 from shared_configs.contextvars import get_current_tenant_id
 
-
 logger = setup_logger()
 ERROR_TYPE_CANCELLED = "cancelled"
+
+
+class ToolCallException(Exception):
+    """Exception raised for errors during tool calls."""
 
 
 class PartialResponse(Protocol):
@@ -137,24 +154,35 @@ def _build_project_llm_docs(
         return project_llm_docs
 
     project_file_id_set = set(project_file_ids)
-    for f in in_memory_user_files:
-        # Only include files that belong to the project (not ad-hoc uploads)
-        if project_file_id_set and (f.file_id in project_file_id_set):
-            try:
-                text_content = f.content.decode("utf-8", errors="ignore")
-            except Exception:
-                text_content = ""
 
-            # Build a short blurb from the file content for better UI display
-            blurb = (
-                (text_content[:200] + "...")
-                if len(text_content) > 200
-                else text_content
-            )
+    def _strip_nuls(s: str) -> str:
+        return s.replace("\x00", "") if s else s
+
+    for f in in_memory_user_files:
+        if project_file_id_set and (f.file_id in project_file_id_set):
+            cleaned_filename = _strip_nuls(f.filename or str(f.file_id))
+
+            if f.file_type.is_text_file():
+                try:
+                    text_content = f.content.decode("utf-8", errors="ignore")
+                    text_content = _strip_nuls(text_content)
+                except Exception:
+                    text_content = ""
+
+                # Build a short blurb from the file content for better UI display
+                blurb = (
+                    (text_content[:200] + "...")
+                    if len(text_content) > 200
+                    else text_content
+                )
+            else:
+                # Non-text (e.g., images): do not decode bytes; keep empty content but allow citation
+                text_content = ""
+                blurb = f"[{f.file_type.value}] {cleaned_filename}"
 
             # Provide basic metadata to improve SavedSearchDoc display
             file_metadata: dict[str, str | list[str]] = {
-                "filename": f.filename or str(f.file_id),
+                "filename": cleaned_filename,
                 "file_type": f.file_type.value,
             }
 
@@ -163,7 +191,7 @@ def _build_project_llm_docs(
                     document_id=str(f.file_id),
                     content=text_content,
                     blurb=blurb,
-                    semantic_identifier=f.filename or str(f.file_id),
+                    semantic_identifier=cleaned_filename,
                     source_type=DocumentSource.USER_FILE,
                     metadata=file_metadata,
                     updated_at=None,
@@ -352,14 +380,12 @@ def stream_chat_message_objects(
         long_term_logger = LongTermLogger(
             metadata={"user_id": str(user_id), "chat_session_id": str(chat_session_id)}
         )
-
         persona = _get_persona_for_chat_session(
             new_msg_req=new_msg_req,
             user=user,
             db_session=db_session,
             default_persona=chat_session.persona,
         )
-
         # TODO: remove once we have an endpoint for this stuff
         process_kg_commands(new_msg_req.message, persona.name, tenant_id, db_session)
 
@@ -395,10 +421,10 @@ def stream_chat_message_objects(
             raise RuntimeError(
                 "Must specify a set of documents for chat or specify search options"
             )
-
         try:
             llm, fast_llm = get_llms_for_persona(
                 persona=persona,
+                user=user,
                 llm_override=new_msg_req.llm_override or chat_session.llm_override,
                 additional_headers=litellm_additional_headers,
                 long_term_logger=long_term_logger,
@@ -502,9 +528,15 @@ def stream_chat_message_objects(
         if new_msg_req.current_message_files:
             for fd in new_msg_req.current_message_files:
                 uid = fd.get("user_file_id")
-                if uid is not None:
-                    user_file_id = UUID(uid)
-                    user_file_ids.append(user_file_id)
+                if not uid:
+                    continue
+                try:
+                    user_file_ids.append(UUID(uid))
+                except (TypeError, ValueError, AttributeError):
+                    logger.warning(
+                        "Skipping invalid user_file_id from current_message_files: %s",
+                        uid,
+                    )
 
         # Load in user files into memory and create search tool override kwargs if needed
         # if we have enough tokens, we don't need to use search
@@ -623,10 +655,11 @@ def stream_chat_message_objects(
         prompt_override = new_msg_req.prompt_override or chat_session.prompt_override
         if new_msg_req.persona_override_config:
             prompt_config = PromptConfig(
-                system_prompt=new_msg_req.persona_override_config.prompts[
+                default_behavior_system_prompt=new_msg_req.persona_override_config.prompts[
                     0
                 ].system_prompt,
-                task_prompt=new_msg_req.persona_override_config.prompts[0].task_prompt,
+                custom_instructions=None,
+                reminder=new_msg_req.persona_override_config.prompts[0].task_prompt,
                 datetime_aware=new_msg_req.persona_override_config.prompts[
                     0
                 ].datetime_aware,
@@ -635,10 +668,11 @@ def stream_chat_message_objects(
             # Apply prompt override on top of persona-embedded prompt
             prompt_config = PromptConfig.from_model(
                 persona,
+                db_session=db_session,
                 prompt_override=prompt_override,
             )
         else:
-            prompt_config = PromptConfig.from_model(persona)
+            prompt_config = PromptConfig.from_model(persona, db_session=db_session)
 
         # Retrieve project-specific instructions if this chat session is associated with a project.
         project_instructions: str | None = (
@@ -693,9 +727,7 @@ def stream_chat_message_objects(
                 answer_style_config=answer_style_config,
                 document_pruning_config=document_pruning_config,
             ),
-            image_generation_tool_config=ImageGenerationToolConfig(
-                additional_headers=litellm_additional_headers,
-            ),
+            image_generation_tool_config=ImageGenerationToolConfig(),
             custom_tool_config=CustomToolConfig(
                 chat_session_id=chat_session_id,
                 message_id=user_message.id if user_message else None,
@@ -729,15 +761,29 @@ def stream_chat_message_objects(
                     and (file.file_id not in project_file_ids)
                 ]
             )
-
+        feature_flag_provider = get_default_feature_flag_provider()
+        simple_agent_framework_disabled = (
+            feature_flag_provider.feature_enabled_for_user_tenant(
+                flag_key=DISABLE_SIMPLE_AGENT_FRAMEWORK,
+                user=user,
+                tenant_id=tenant_id,
+            )
+            or new_msg_req.use_agentic_search
+        )
+        prompt_user_message = default_build_user_message(
+            user_query=final_msg.message,
+            prompt_config=prompt_config,
+            files=latest_query_files,
+        )
+        memories = get_memories(user, db_session)
+        system_message = (
+            default_build_system_message_v2(prompt_config, llm.config, memories, tools)
+            if not simple_agent_framework_disabled and persona.is_default_persona
+            else default_build_system_message(prompt_config, llm.config, memories)
+        )
         prompt_builder = AnswerPromptBuilder(
-            user_message=default_build_user_message(
-                user_query=final_msg.message,
-                prompt_config=prompt_config,
-                files=latest_query_files,
-                single_message_history=single_message_history,
-            ),
-            system_message=default_build_system_message(prompt_config, llm.config),
+            user_message=prompt_user_message,
+            system_message=system_message,
             message_history=message_history,
             llm_config=llm.config,
             raw_user_query=final_msg.message,
@@ -760,6 +806,7 @@ def stream_chat_message_objects(
                 or get_main_llm_from_tuple(
                     get_llms_for_persona(
                         persona=persona,
+                        user=user,
                         llm_override=(
                             new_msg_req.llm_override or chat_session.llm_override
                         ),
@@ -779,11 +826,31 @@ def stream_chat_message_objects(
             skip_gen_ai_answer_generation=new_msg_req.skip_gen_ai_answer_generation,
             project_instructions=project_instructions,
         )
+        if not simple_agent_framework_disabled:
+            llm_model, model_settings = get_llm_model_and_settings_for_persona(
+                persona=persona,
+                llm_override=(new_msg_req.llm_override or chat_session.llm_override),
+                additional_headers=litellm_additional_headers,
+                timeout=None,  # Will use default timeout logic
+            )
+            yield from _fast_message_stream(
+                answer,
+                tools,
+                db_session,
+                get_redis_client(),
+                chat_session_id,
+                reserved_message_id,
+                prompt_config,
+                llm_model,
+                model_settings,
+                user,
+            )
+        else:
+            from onyx.chat.packet_proccessing import process_streamed_packets
 
-        # Process streamed packets using the new packet processing module
-        yield from process_streamed_packets(
-            answer_processed_output=answer.processed_streamed_output,
-        )
+            yield from process_streamed_packets.process_streamed_packets(
+                answer_processed_output=answer.processed_streamed_output,
+            )
 
     except ValueError as e:
         logger.exception("Failed to process chat message.")
@@ -818,6 +885,87 @@ def stream_chat_message_objects(
 
         db_session.rollback()
         return
+
+
+# TODO: Refactor this to live somewhere else
+def _reserve_prompt_tokens_for_agent_overhead(
+    prompt_builder: AnswerPromptBuilder,
+    primary_llm: LLM,
+    tools: list[Tool],
+    prompt_config: PromptConfig,
+) -> None:
+    try:
+        tokenizer = get_tokenizer(
+            provider_type=primary_llm.config.model_provider,
+            model_name=primary_llm.config.model_name,
+        )
+    except Exception:
+        logger.exception("Failed to initialize tokenizer for agent token budgeting.")
+        return
+
+    reserved_tokens = 0
+
+    if tools:
+        try:
+            reserved_tokens += compute_all_tool_tokens(tools, tokenizer)
+        except Exception:
+            logger.exception("Failed to compute tool token budget.")
+
+    custom_instructions = prompt_config.custom_instructions
+    if custom_instructions:
+        custom_instruction_text = f"Custom Instructions: {custom_instructions}"
+        reserved_tokens += len(tokenizer.encode(custom_instruction_text))
+
+    if reserved_tokens <= 0:
+        return
+
+    prompt_builder.max_tokens = max(0, prompt_builder.max_tokens - reserved_tokens)
+
+
+def _fast_message_stream(
+    answer: Answer,
+    tools: list[Tool],
+    db_session: Session,
+    redis_client: Redis,
+    chat_session_id: UUID,
+    reserved_message_id: int,
+    prompt_config: PromptConfig,
+    llm_model: Model,
+    model_settings: ModelSettings,
+    user_or_none: User | None,
+) -> Generator[Packet, None, None]:
+    # TODO: clean up this jank
+    is_responses_api = isinstance(llm_model, OpenAIResponsesModel)
+    prompt_builder = answer.graph_inputs.prompt_builder
+    primary_llm = answer.graph_tooling.primary_llm
+    if prompt_builder and primary_llm:
+        _reserve_prompt_tokens_for_agent_overhead(
+            prompt_builder, primary_llm, tools, prompt_config
+        )
+    messages = base_messages_to_agent_sdk_msgs(
+        answer.graph_inputs.prompt_builder.build(), is_responses_api=is_responses_api
+    )
+    emitter = get_default_emitter()
+    return fast_chat_turn.fast_chat_turn(
+        messages=messages,
+        # TODO: Maybe we can use some DI framework here?
+        dependencies=ChatTurnDependencies(
+            llm_model=llm_model,
+            model_settings=model_settings,
+            llm=answer.graph_tooling.primary_llm,
+            tools=tools,
+            db_session=db_session,
+            redis_client=redis_client,
+            emitter=emitter,
+            user_or_none=user_or_none,
+            prompt_config=prompt_config,
+        ),
+        chat_session_id=chat_session_id,
+        message_id=reserved_message_id,
+        research_type=answer.graph_config.behavior.research_type,
+        prompt_config=prompt_config,
+        force_use_tool=answer.graph_tooling.force_use_tool,
+    )
 
 
 @log_generator_function_time()

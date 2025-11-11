@@ -6,22 +6,18 @@ import {
   useEffect,
   useRef,
   useState,
+  JSX,
 } from "react";
 import { ChevronDownIcon, PlusIcon } from "./icons/icons";
 import { FiCheck, FiChevronDown, FiInfo } from "react-icons/fi";
 import { Popover } from "./popover/Popover";
-import {
-  Tooltip,
-  TooltipProvider,
-  TooltipTrigger,
-  TooltipContent,
-} from "@/components/ui/tooltip";
+import SimpleTooltip from "@/refresh-components/SimpleTooltip";
 
 export interface Option<T> {
   name: string;
   value: T;
   description?: string;
-  icon?: React.FC<{ size?: number; className?: string }>;
+  icon?: (props: { size?: number; className?: string }) => JSX.Element;
   // Domain-specific flag: when false, render as disabled (used by AccessTypeForm)
   disabled?: boolean;
   disabledReason?: string;
@@ -70,7 +66,7 @@ export function SearchMultiSelectDropdown({
 }: {
   options: StringOrNumberOption[];
   onSelect: (selected: StringOrNumberOption) => void;
-  itemComponent?: FC<{ option: StringOrNumberOption }>;
+  itemComponent?: (props: { option: StringOrNumberOption }) => JSX.Element;
   onCreate?: (name: string) => void;
   onDelete?: (name: string) => void;
   onSearchTermChange?: (term: string) => void;
@@ -310,7 +306,7 @@ export function DefaultDropdownElement({
   disabledReason,
 }: {
   name: string | JSX.Element;
-  icon?: React.FC<{ size?: number; className?: string }>;
+  icon?: (props: { size?: number; className?: string }) => JSX.Element;
   description?: string;
   onSelect?: () => void;
   isSelected?: boolean;
@@ -349,22 +345,11 @@ export function DefaultDropdownElement({
           {icon && icon({ size: 16, className: "mr-2 h-4 w-4 my-auto" })}
           {name}
           {disabled && disabledReason && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="ml-2 my-auto p-1 rounded hover:bg-background-100 text-warning transition-colors cursor-default">
-                    <FiInfo size={14} className="text-warning" />
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent
-                  side="right"
-                  className="max-w-64 text-white dark:text-black"
-                  backgroundColor="bg-black dark:bg-white"
-                >
-                  {disabledReason}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <SimpleTooltip tooltip={disabledReason}>
+              <span className="ml-2 my-auto p-1 rounded hover:bg-background-100 text-warning transition-colors cursor-default">
+                <FiInfo size={14} className="text-warning" />
+              </span>
+            </SimpleTooltip>
           )}
         </div>
         {description && <div className="text-xs">{description}</div>}

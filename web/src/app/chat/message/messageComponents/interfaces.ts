@@ -1,3 +1,4 @@
+import { JSX } from "react";
 import { MinimalPersonaSnapshot } from "@/app/admin/assistants/interfaces";
 import { FeedbackType } from "../../interfaces";
 import { Packet } from "../../services/streamingModels";
@@ -13,7 +14,11 @@ export enum RenderType {
 }
 
 export interface FullChatState {
-  handleFeedback: (feedback: FeedbackType) => void;
+  handleFeedbackChange: (
+    newFeedback: FeedbackType | null,
+    feedbackText?: string,
+    predefinedFeedback?: string
+  ) => Promise<void>;
   assistant: MinimalPersonaSnapshot;
   // Document-related context for citations
   docs?: OnyxDocument[] | null;
@@ -23,6 +28,7 @@ export interface FullChatState {
   // Regenerate functionality
   regenerate?: (modelOverRide: LlmDescriptor) => Promise<void>;
   overriddenModel?: string;
+  researchType?: string | null;
 }
 
 export interface RendererResult {

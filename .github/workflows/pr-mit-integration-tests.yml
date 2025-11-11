@@ -16,12 +16,14 @@ env:
   # Test Environment Variables
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
   SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-  CONFLUENCE_TEST_SPACE_URL: ${{ secrets.CONFLUENCE_TEST_SPACE_URL }}
-  CONFLUENCE_USER_NAME: ${{ secrets.CONFLUENCE_USER_NAME }}
+  CONFLUENCE_TEST_SPACE_URL: ${{ vars.CONFLUENCE_TEST_SPACE_URL }}
+  CONFLUENCE_USER_NAME: ${{ vars.CONFLUENCE_USER_NAME }}
   CONFLUENCE_ACCESS_TOKEN: ${{ secrets.CONFLUENCE_ACCESS_TOKEN }}
+  CONFLUENCE_ACCESS_TOKEN_SCOPED: ${{ secrets.CONFLUENCE_ACCESS_TOKEN_SCOPED }}
   JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
   JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
   JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+  JIRA_API_TOKEN_SCOPED: ${{ secrets.JIRA_API_TOKEN_SCOPED }}
   PERM_SYNC_SHAREPOINT_CLIENT_ID: ${{ secrets.PERM_SYNC_SHAREPOINT_CLIENT_ID }}
   PERM_SYNC_SHAREPOINT_PRIVATE_KEY: ${{ secrets.PERM_SYNC_SHAREPOINT_PRIVATE_KEY }}
   PERM_SYNC_SHAREPOINT_CERTIFICATE_PASSWORD: ${{ secrets.PERM_SYNC_SHAREPOINT_CERTIFICATE_PASSWORD }}
@@ -34,7 +36,7 @@ jobs:
       test-dirs: ${{ steps.set-matrix.outputs.test-dirs }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # ratchet:actions/checkout@v4
 
       - name: Discover test directories
         id: set-matrix
@@ -60,67 +62,32 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # ratchet:actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Prepare build
+        uses: ./.github/actions/prepare-build
         with:
-          python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: |
-            backend/requirements/default.txt
-            backend/requirements/dev.txt
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install --retries 5 --timeout 30 -r backend/requirements/default.txt
-          pip install --retries 5 --timeout 30 -r backend/requirements/dev.txt
-
-      - name: Generate OpenAPI schema
-        working-directory: ./backend
-        env:
-          PYTHONPATH: "."
-        run: |
-          python scripts/onyx_openapi_schema.py --filename generated/openapi.json
-
-      - name: Generate OpenAPI Python client
-        working-directory: ./backend
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}/backend/generated:/local" \
-            openapitools/openapi-generator-cli generate \
-            -i /local/openapi.json \
-            -g python \
-            -o /local/onyx_openapi_client \
-            --package-name onyx_openapi_client \
-            --skip-validate-spec \
-            --openapi-normalizer "SIMPLIFY_ONEOF_ANYOF=true,SET_OAS3_NULLABLE=true"
-
-      - name: Upload OpenAPI artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: openapi-artifacts
-          path: backend/generated/
+          docker-username: ${{ secrets.DOCKER_USERNAME }}
+          docker-password: ${{ secrets.DOCKER_TOKEN }}
 
   build-backend-image:
     runs-on: blacksmith-16vcpu-ubuntu-2404-arm
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # ratchet:actions/checkout@v4
 
       - name: Login to Private Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # ratchet:docker/login-action@v3
         with:
           registry: ${{ env.PRIVATE_REGISTRY }}
           username: ${{ env.PRIVATE_REGISTRY_USERNAME }}
           password: ${{ env.PRIVATE_REGISTRY_PASSWORD }}
 
       - name: Set up Docker Buildx
-        uses: useblacksmith/setup-docker-builder@v1
+        uses: useblacksmith/setup-docker-builder@affa10db466676f3dfb3e54caeb228ee0691510f # ratchet:useblacksmith/setup-docker-builder@v1
 
       - name: Build and push Backend Docker image
-        uses: useblacksmith/build-push-action@v2
+        uses: useblacksmith/build-push-action@30c71162f16ea2c27c3e21523255d209b8b538c1 # ratchet:useblacksmith/build-push-action@v2
         with:
           context: ./backend
           file: ./backend/Dockerfile
@@ -128,25 +95,27 @@ jobs:
           tags: ${{ env.PRIVATE_REGISTRY }}/integration-test-onyx-backend:test-${{ github.run_id }}
           push: true
           outputs: type=registry
+          no-cache: true
+
 
   build-model-server-image:
     runs-on: blacksmith-16vcpu-ubuntu-2404-arm
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # ratchet:actions/checkout@v4
 
       - name: Login to Private Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # ratchet:docker/login-action@v3
         with:
           registry: ${{ env.PRIVATE_REGISTRY }}
           username: ${{ env.PRIVATE_REGISTRY_USERNAME }}
           password: ${{ env.PRIVATE_REGISTRY_PASSWORD }}
 
       - name: Set up Docker Buildx
-        uses: useblacksmith/setup-docker-builder@v1
+        uses: useblacksmith/setup-docker-builder@affa10db466676f3dfb3e54caeb228ee0691510f # ratchet:useblacksmith/setup-docker-builder@v1
 
       - name: Build and push Model Server Docker image
-        uses: useblacksmith/build-push-action@v2
+        uses: useblacksmith/build-push-action@30c71162f16ea2c27c3e21523255d209b8b538c1 # ratchet:useblacksmith/build-push-action@v2
         with:
           context: ./backend
           file: ./backend/Dockerfile.model_server
@@ -155,39 +124,37 @@ jobs:
           push: true
           outputs: type=registry
           provenance: false
+          no-cache: ${{ vars.DOCKER_NO_CACHE == 'true' }}
+
 
   build-integration-image:
     needs: prepare-build
     runs-on: blacksmith-16vcpu-ubuntu-2404-arm
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # ratchet:actions/checkout@v4
 
       - name: Login to Private Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # ratchet:docker/login-action@v3
         with:
           registry: ${{ env.PRIVATE_REGISTRY }}
           username: ${{ env.PRIVATE_REGISTRY_USERNAME }}
           password: ${{ env.PRIVATE_REGISTRY_PASSWORD }}
 
       - name: Download OpenAPI artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # ratchet:actions/download-artifact@v4
         with:
           name: openapi-artifacts
           path: backend/generated/
 
       - name: Set up Docker Buildx
-        uses: useblacksmith/setup-docker-builder@v1
+        uses: useblacksmith/setup-docker-builder@affa10db466676f3dfb3e54caeb228ee0691510f # ratchet:useblacksmith/setup-docker-builder@v1
 
-      - name: Build and push integration test Docker image
-        uses: useblacksmith/build-push-action@v2
-        with:
-          context: ./backend
-          file: ./backend/tests/integration/Dockerfile
-          platforms: linux/arm64
-          tags: ${{ env.PRIVATE_REGISTRY }}/integration-test-onyx-integration:test-${{ github.run_id }}
-          push: true
-          outputs: type=registry
+      - name: Build and push integration test image with Docker Bake
+        env:
+          REGISTRY: ${{ env.PRIVATE_REGISTRY }}
+          TAG: test-${{ github.run_id }}
+        run: cd backend && docker buildx bake --no-cache --push integration
 
   integration-tests-mit:
     needs:
@@ -207,10 +174,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # ratchet:actions/checkout@v4
 
       - name: Login to Private Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # ratchet:docker/login-action@v3
         with:
           registry: ${{ env.PRIVATE_REGISTRY }}
           username: ${{ env.PRIVATE_REGISTRY_USERNAME }}
@@ -220,7 +187,7 @@ jobs:
       # otherwise, we hit the "Unauthenticated users" limit
       # https://docs.docker.com/docker-hub/usage/
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # ratchet:docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
@@ -279,15 +246,15 @@ jobs:
           while true; do
             current_time=$(date +%s)
             elapsed_time=$((current_time - start_time))
-            
+
             if [ $elapsed_time -ge $timeout ]; then
               echo "Timeout reached. Service did not become ready in 5 minutes."
               exit 1
             fi
-            
+
             # Use curl with error handling to ignore specific exit code 56
             response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || echo "curl_error")
-            
+
             if [ "$response" = "200" ]; then
               echo "Service is ready!"
               break
@@ -296,7 +263,7 @@ jobs:
             else
               echo "Service not ready yet (HTTP status $response). Retrying in 5 seconds..."
             fi
-            
+
             sleep 5
           done
           echo "Finished waiting for service."
@@ -309,7 +276,7 @@ jobs:
 
       # NOTE: Use pre-ping/null to reduce flakiness due to dropped connections
       - name: Run Integration Tests for ${{ matrix.test-dir.name }}
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08 # ratchet:nick-fields/retry@v3
         with:
           timeout_minutes: 20
           max_attempts: 3
@@ -334,9 +301,11 @@ jobs:
               -e CONFLUENCE_TEST_SPACE_URL=${CONFLUENCE_TEST_SPACE_URL} \
               -e CONFLUENCE_USER_NAME=${CONFLUENCE_USER_NAME} \
               -e CONFLUENCE_ACCESS_TOKEN=${CONFLUENCE_ACCESS_TOKEN} \
+              -e CONFLUENCE_ACCESS_TOKEN_SCOPED=${CONFLUENCE_ACCESS_TOKEN_SCOPED} \
               -e JIRA_BASE_URL=${JIRA_BASE_URL} \
               -e JIRA_USER_EMAIL=${JIRA_USER_EMAIL} \
               -e JIRA_API_TOKEN=${JIRA_API_TOKEN} \
+              -e JIRA_API_TOKEN_SCOPED=${JIRA_API_TOKEN_SCOPED} \
               -e PERM_SYNC_SHAREPOINT_CLIENT_ID=${PERM_SYNC_SHAREPOINT_CLIENT_ID} \
               -e PERM_SYNC_SHAREPOINT_PRIVATE_KEY="${PERM_SYNC_SHAREPOINT_PRIVATE_KEY}" \
               -e PERM_SYNC_SHAREPOINT_CERTIFICATE_PASSWORD=${PERM_SYNC_SHAREPOINT_CERTIFICATE_PASSWORD} \
@@ -363,7 +332,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # ratchet:actions/upload-artifact@v4
         with:
           name: docker-all-logs-${{ matrix.test-dir.name }}
           path: ${{ github.workspace }}/docker-compose.log
@@ -375,13 +344,13 @@ jobs:
           cd deployment/docker_compose
           docker compose down -v
 
-  
-  required: 
+
+  required:
     runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     needs: [integration-tests-mit]
     if: ${{ always() }}
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # ratchet:actions/github-script@v8
         with:
           script: |
             const needs = ${{ toJSON(needs) }};

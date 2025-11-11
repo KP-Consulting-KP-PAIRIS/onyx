@@ -1,19 +1,17 @@
 import React, { useCallback } from "react";
 import { MinimalOnyxDocument } from "@/lib/search/interfaces";
 import { FileDescriptor } from "@/app/chat/interfaces";
-import { HumanMessage } from "./HumanMessage";
+import HumanMessage from "./HumanMessage";
 
 interface BaseMemoizedHumanMessageProps {
   content: string;
   files?: FileDescriptor[];
   messageId?: number | null;
-  nodeId?: number;
   otherMessagesCanSwitchTo?: number[];
   onMessageSelection?: (messageId: number) => void;
   shared?: boolean;
   stopGenerating?: () => void;
   disableSwitchingForStreaming?: boolean;
-  setPresentingDocument: (document: MinimalOnyxDocument) => void;
 }
 
 interface InternalMemoizedHumanMessageProps
@@ -22,23 +20,18 @@ interface InternalMemoizedHumanMessageProps
 }
 
 interface MemoizedHumanMessageProps extends BaseMemoizedHumanMessageProps {
-  handleEditWithMessageId: (
-    editedContent: string,
-    messageId: number | null | undefined
-  ) => void;
+  handleEditWithMessageId: (editedContent: string, messageId: number) => void;
 }
 
 const _MemoizedHumanMessage = React.memo(function _MemoizedHumanMessage({
   content,
   files,
   messageId,
-  nodeId,
   otherMessagesCanSwitchTo,
   onMessageSelection,
   shared,
   stopGenerating,
   disableSwitchingForStreaming,
-  setPresentingDocument,
   onEdit,
 }: InternalMemoizedHumanMessageProps) {
   return (
@@ -46,13 +39,11 @@ const _MemoizedHumanMessage = React.memo(function _MemoizedHumanMessage({
       content={content}
       files={files}
       messageId={messageId ?? undefined}
-      nodeId={nodeId}
       otherMessagesCanSwitchTo={otherMessagesCanSwitchTo}
       onMessageSelection={onMessageSelection}
       shared={shared}
       stopGenerating={stopGenerating}
       disableSwitchingForStreaming={disableSwitchingForStreaming}
-      setPresentingDocument={setPresentingDocument}
       onEdit={onEdit}
     />
   );
@@ -62,18 +53,23 @@ export const MemoizedHumanMessage = ({
   content,
   files,
   messageId,
-  nodeId,
   otherMessagesCanSwitchTo,
   onMessageSelection,
   shared,
   stopGenerating,
   disableSwitchingForStreaming,
-  setPresentingDocument,
   handleEditWithMessageId,
 }: MemoizedHumanMessageProps) => {
   const onEdit = useCallback(
     (editedContent: string) => {
-      handleEditWithMessageId(editedContent, messageId ?? undefined);
+      if (messageId === null || messageId === undefined) {
+        console.warn(
+          "No message id specified; cannot edit an undefined message"
+        );
+        return;
+      }
+
+      handleEditWithMessageId(editedContent, messageId);
     },
     [handleEditWithMessageId, messageId]
   );
@@ -83,13 +79,11 @@ export const MemoizedHumanMessage = ({
       content={content}
       files={files}
       messageId={messageId}
-      nodeId={nodeId}
       otherMessagesCanSwitchTo={otherMessagesCanSwitchTo}
       onMessageSelection={onMessageSelection}
       shared={shared}
       stopGenerating={stopGenerating}
       disableSwitchingForStreaming={disableSwitchingForStreaming}
-      setPresentingDocument={setPresentingDocument}
       onEdit={onEdit}
     />
   );
