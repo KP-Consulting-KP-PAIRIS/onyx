@@ -60,9 +60,12 @@ class BookstackConnector(LoadConnector, PollConnector):
             ).strftime("%Y-%m-%d")
 
         if end:
-            params["filter[updated_at:lte]"] = datetime.utcfromtimestamp(end).strftime(
-                "%Y-%m-%d"
-            )
+            #params["filter[updated_at:lte]"] = datetime.utcfromtimestamp(end).strftime(
+            #    "%Y-%m-%d"
+            #)
+            tomorrow = datetime.utcfromtimestamp(end) + timedelta(days=1)
+            formatted_tomorrow = tomorrow.strftime("%Y-%m-%d")
+            params["filter[updated_at:lte]"] = formatted_tomorrow
 
         batch = bookstack_client.get(endpoint, params=params).get("data", [])
         doc_batch = [transformer(bookstack_client, item) for item in batch]
